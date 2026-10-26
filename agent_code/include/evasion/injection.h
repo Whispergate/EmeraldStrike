@@ -1,0 +1,10 @@
+#ifndef EMERALDSTRIKE_INJECTION_H
+#define EMERALDSTRIKE_INJECTION_H
+
+#include "../common.h"
+#include "../config.h"
+
+HANDLE inject_shellcode_into(PINSTANCE inst, HANDLE hProcess, BYTE* shellcode, DWORD sc_len);
+BOOL inject_shellcode(PINSTANCE inst, DWORD pid, BYTE* shellcode, DWORD sc_len);
+
+#endif // EMERALDSTRIKE_INJECTION_H
