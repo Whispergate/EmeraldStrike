@@ -7,9 +7,7 @@ VOID cmd_sleep(PINSTANCE inst, PPARSER args, PPACKAGE response) {
     DWORD interval = parser_int32(args);
     DWORD jitter   = parser_int32(args);
 
-    if (interval > 0) {
-        inst->Config.sleep_ms = interval * 1000;
-    }
+    inst->Config.sleep_ms = interval * 1000;
     if (jitter <= 100) {
         inst->Config.jitter = jitter;
     }

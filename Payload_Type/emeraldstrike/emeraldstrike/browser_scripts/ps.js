@@ -21,12 +21,19 @@ function(task, responses){
             let lines = text.split("\n").filter(l => l.trim().length > 0);
             for(let i = 0; i < lines.length; i++){
                 let parts = lines[i].trim().split(/\s+/);
-                if(parts.length < 4) continue;
-                let rowNum = parseInt(parts[0]);
-                let pid = parseInt(parts[1]);
-                let ppid = parseInt(parts[2]);
-                if(isNaN(pid) || isNaN(ppid)) continue;
-                let name = parts.slice(3).join(" ");
+                // C++ output is "pid\tppid\tname"; also tolerate a leading row index
+                if(parts.length < 3) continue;
+                let pid, ppid, name;
+                if(parts.length >= 4 && !isNaN(parseInt(parts[0])) && !isNaN(parseInt(parts[1])) && isNaN(parseInt(parts[2]))){
+                    pid = parseInt(parts[1]);
+                    ppid = parseInt(parts[2]);
+                    name = parts.slice(3).join(" ");
+                }else{
+                    pid = parseInt(parts[0]);
+                    ppid = parseInt(parts[1]);
+                    name = parts.slice(2).join(" ");
+                }
+                if(isNaN(pid) || isNaN(ppid) || name.length === 0) continue;
                 data.push({
                     process_id: pid,
                     parent_process_id: ppid,
@@ -135,6 +142,7 @@ function(task, responses){
             {"plaintext": "actions", "type": "button", "width": 80, "disableSort": true},
             {"plaintext": "pid", "type": "number", "width": 100},
             {"plaintext": "ppid", "type": "number", "width": 100},
+            {"plaintext": "user", "type": "string", "width": 200},
             {"plaintext": "name", "type": "string", "fillWidth": true},
         ];
         let rows = [];
@@ -176,6 +184,7 @@ function(task, responses){
                 "rowStyle": rowStyle,
                 "pid":  {"plaintext": proc.process_id, "cellStyle": {}},
                 "ppid": {"plaintext": proc.parent_process_id, "cellStyle": {}},
+                "user": {"plaintext": proc.user || "-", "cellStyle": {}},
                 "name": nameCell,
                 "actions": {"button": {
                     "name": "",

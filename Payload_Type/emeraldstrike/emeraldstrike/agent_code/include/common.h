@@ -350,6 +350,15 @@ typedef struct _INSTANCE {
     char*  argue_args;
     DWORD  argue_len;
 
+    // Token ops (make_token/steal_token/rev2self)
+    HANDLE ImpersonationToken;
+
+    // ppid spoof target (0 = disabled); consumed by spawn/shell CreateProcess
+    DWORD  SpoofPPID;
+
+    // blockdlls: block non-Microsoft DLLs for future spawned processes
+    BOOL   BlockDlls;
+
     // CLR/PowerShell pipe state (shared by execute_assembly and powerpick)
     HANDLE ClrPipeRead;
     HANDLE ClrPipeWrite;

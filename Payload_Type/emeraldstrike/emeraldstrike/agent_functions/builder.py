@@ -594,7 +594,11 @@ class EmeraldStrike(PayloadType):
             userwx = self.get_parameter("userwx")
         except Exception:
             userwx = False
-        exec_prot = "PAGE_EXECUTE_READWRITE" if userwx else "PAGE_EXECUTE_READ"
+        # The agent's PIC entry keeps its INSTANCE struct (__Instance/__InstanceStorage,
+        # 16KB) inside .text and writes to it at runtime, so the shellcode region must
+        # be writable. PAGE_EXECUTE_READ faults on the first instance write (AV at the
+        # `mov [__Instance], rcx` in _start). Always allocate RWX in the PIC wrapper.
+        exec_prot = "PAGE_EXECUTE_READWRITE"
 
         loader_code = f"""
 #include <windows.h>

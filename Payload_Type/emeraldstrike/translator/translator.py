@@ -28,6 +28,69 @@ TLV_TYPE_EXT_IP    = 0x17
 TLV_TYPE_PROCNAME  = 0x18
 TLV_TYPE_OS_INFO   = 0x19
 
+# Task id -> agent-registered file_id, shared between the translator (which sees
+# the file_id Mythic returns in get_tasking responses) and the payload container
+# code (screenshot.py process_response), which runs in the same container.
+FILE_ID_MAP_PATH = "/Mythic/file_id_map.json"
+
+
+def _save_file_id_map(get_tasking_msg):
+    try:
+        mapping = {}
+        for t in get_tasking_msg.get("tasks", []):
+            fid = t.get("file_id")
+            if fid and t.get("id"):
+                mapping[str(t["id"])] = fid
+        # Mythic replies to agent post_responses at the TOP LEVEL of the
+        # get_tasking message: {"responses": [{"task_id","file_id",...}, ...]}
+        for r in get_tasking_msg.get("responses", []) or []:
+            rid = r.get("file_id")
+            tid = r.get("task_id")
+            if rid and tid:
+                mapping[str(tid)] = rid
+        if not mapping:
+            return
+        import json as _json
+        import os as _os
+        merged = {}
+        if _os.path.exists(FILE_ID_MAP_PATH):
+            try:
+                with open(FILE_ID_MAP_PATH) as f:
+                    merged = _json.load(f)
+            except Exception:
+                merged = {}
+        merged.update(mapping)
+        # keep it bounded
+        if len(merged) > 200:
+            merged = dict(sorted(merged.items())[-100:])
+        with open(FILE_ID_MAP_PATH, "w") as f:
+            _json.dump(merged, f)
+    except Exception as e:
+        logger.error(f"_save_file_id_map error: {e}")
+
+
+def action_is_get_tasking_with_file(msg):
+    if msg.get("action") != "get_tasking":
+        return False
+    if any(r.get("file_id") for r in msg.get("responses", []) or []):
+        return True
+    for t in msg.get("tasks", []):
+        if t.get("file_id") or any(r.get("file_id") for r in t.get("responses", []) or []):
+            return True
+    return False
+
+
+def _looks_like_ps_listing(out: bytes) -> bool:
+    """Every non-empty line is 'pid\\tppid\\t[user\\t]name' with numeric pid/ppid."""
+    lines = [l for l in out.decode("utf-8", errors="replace").splitlines() if l.strip()]
+    if len(lines) < 2:
+        return False
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            return False
+    return True
+
 
 def _pack_tlv(tlv_type, data):
     if isinstance(data, str):
@@ -88,6 +151,13 @@ _CMD_SCHEMAS = {
     "execute_assembly":  [("assembly_data", "b64"), ("arguments", "string")],
     "powerpick":         [("runner_data", "b64"), ("script", "string")],
     "exit":              [("method_int", "int32")],
+    "run":               [("executable", "string"), ("arguments", "string")],
+    "execute":           [("executable", "string"), ("arguments", "string")],
+    "ppid":              [("pid", "int32")],
+    "steal_token":       [("pid", "int32")],
+    "make_token":        [("domain", "string"), ("username", "string"), ("password", "string")],
+    "blockdlls":         [("action", "string")],
+    "argue":             [("action", "string"), ("fake_args", "string")],
 }
 
 
@@ -142,6 +212,16 @@ class EmeraldStrikeTranslator(TranslationContainer):
             msg = inputMsg.Message
             if isinstance(msg, str):
                 msg = json.loads(msg)
+
+            # Mythic's reply to an agent post_response carries the registered
+            # file_id: {"responses":[{"task_id","file_id"}]} (no action key).
+            # Stash task_id -> file_id so the payload container (screenshot.py
+            # process_response) can pick it up.
+            if isinstance(msg.get("responses"), list) and msg["responses"]:
+                _save_file_id_map({"responses": msg["responses"]})
+                # nothing to send back to the agent for this reply
+                response.Message = b""
+                return response
 
             buf = b""
             action = msg.get("action", "")
@@ -252,7 +332,49 @@ class EmeraldStrikeTranslator(TranslationContainer):
                     msg["data"] = base64.b64encode(tlvs[TLV_TYPE_DATA]).decode()
 
             if TLV_TYPE_OUTPUT in tlvs:
-                msg["user_output"] = tlvs[TLV_TYPE_OUTPUT].decode("utf-8", errors="replace")
+                out = tlvs[TLV_TYPE_OUTPUT]
+                if out.startswith(b"ESPNG:"):
+                    # screenshot: magic + PNG bytes -> single-chunk Mythic download
+                    png = out[6:]
+                    msg["screenshot_png"] = base64.b64encode(png).decode()
+                    msg["user_output"] = f"Screenshot captured ({len(png)} bytes)"
+                elif out.startswith(b"ESDL:"):
+                    # download: magic + int32 name_len + filename + int32 size + contents
+                    rest = out[5:]
+                    try:
+                        name_len = struct.unpack(">I", rest[:4])[0]
+                        filename = rest[4:4 + name_len].decode("utf-8", errors="replace")
+                        fsize = struct.unpack(">I", rest[4 + name_len:8 + name_len])[0]
+                        data = rest[8 + name_len:]
+                        if len(data) != fsize:
+                            raise ValueError(f"size mismatch: expected {fsize}, got {len(data)}")
+                        msg["file_download"] = {
+                            "filename": filename,
+                            "data_b64": base64.b64encode(data).decode(),
+                        }
+                        msg["user_output"] = f"Downloaded {filename} ({fsize} bytes)"
+                    except Exception as e:
+                        logger.error(f"ESDL parse error: {e}")
+                        msg["user_output"] = out.decode("utf-8", errors="replace")
+                elif _looks_like_ps_listing(out):
+                    # ps: "pid\tppid\t[user\t]name\n" lines -> JSON array for the ps
+                    # browser script (same shape Starburst's translator emits)
+                    procs = []
+                    for line in out.decode("utf-8", errors="replace").splitlines():
+                        parts = line.split("\t")
+                        if len(parts) >= 4 and parts[0].isdigit() and parts[1].isdigit():
+                            procs.append({
+                                "process_id": int(parts[0]),
+                                "parent_process_id": int(parts[1]),
+                                "user": parts[2],
+                                "name": "\t".join(parts[3:]),
+                            })
+                    if procs:
+                        msg["user_output"] = json.dumps(procs)
+                    else:
+                        msg["user_output"] = out.decode("utf-8", errors="replace")
+                else:
+                    msg["user_output"] = out.decode("utf-8", errors="replace")
 
             if TLV_TYPE_ERROR in tlvs:
                 msg["user_output"] = tlvs[TLV_TYPE_ERROR].decode("utf-8", errors="replace")
@@ -263,6 +385,26 @@ class EmeraldStrikeTranslator(TranslationContainer):
                 resp_entry = {"task_id": task_id}
                 if "user_output" in msg:
                     resp_entry["user_output"] = msg.pop("user_output")
+                if "screenshot_png" in msg:
+                    resp_entry["download"] = {
+                        "total_chunks": 1,
+                        "chunk_num": 1,
+                        "chunk_data": msg.pop("screenshot_png"),
+                        "full_path": "screenshot.png",
+                        "is_screenshot": True,
+                    }
+                    # makes Mythic route this to the container's
+                    # process_response (screenshot.py), which then resolves
+                    # the registered file_id for the browser script
+                    resp_entry["process_response"] = "screenshot"
+                if "file_download" in msg:
+                    fd = msg.pop("file_download")
+                    resp_entry["download"] = {
+                        "total_chunks": 1,
+                        "chunk_num": 1,
+                        "chunk_data": fd["data_b64"],
+                        "full_path": fd["filename"],
+                    }
                 if "status" in msg and msg["status"] == "error":
                     resp_entry["status"] = "error"
                     msg.pop("status")

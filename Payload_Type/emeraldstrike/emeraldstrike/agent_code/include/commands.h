@@ -29,6 +29,24 @@ VOID cmd_sleep(PINSTANCE inst, PPARSER args, PPACKAGE response);
 VOID cmd_whoami(PINSTANCE inst, PPARSER args, PPACKAGE response);
 VOID cmd_getuid(PINSTANCE inst, PPARSER args, PPACKAGE response);
 VOID cmd_ps(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+VOID cmd_screenshot(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+VOID cmd_run(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+VOID cmd_execute(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+VOID cmd_make_token(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+VOID cmd_steal_token(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+VOID cmd_rev2self(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+VOID cmd_getprivs(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+VOID cmd_ppid(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+VOID cmd_blockdlls(PINSTANCE inst, PPARSER args, PPACKAGE response);
 VOID cmd_kill(PINSTANCE inst, PPARSER args, PPACKAGE response);
 VOID cmd_cp(PINSTANCE inst, PPARSER args, PPACKAGE response);
 VOID cmd_mv(PINSTANCE inst, PPARSER args, PPACKAGE response);

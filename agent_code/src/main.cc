@@ -1266,10 +1266,10 @@ EXTERN_C VOID main_entry(PVOID base_addr) {
 
     agent_init(inst, (HINSTANCE)base_addr);
 
-#ifdef INCLUDE_EVASION_CLEANUP
-    discover_shellcode_alloc(inst, base_addr);
-    cleanup_shellcode(inst);
-#endif
+    /* NOTE: INCLUDE_EVASION_CLEANUP does not apply here. In standalone PIC mode
+       base_addr is the allocation holding this agent's own .text and instance
+       storage. cleanup would VirtualProtect/zero/free it while we execute
+       inside it - instant AV on the next instruction fetch. */
 
     agent_main(inst);
 }

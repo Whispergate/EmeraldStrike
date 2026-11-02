@@ -1,3 +1,9 @@
++++
+title = "UDRL Development"
+chapter = false
+weight = 2
++++
+
 # UDRL Development: Cobalt Strike vs Mythic (EmeraldStrike)
 
 EmeraldStrike's UDRL kit is a direct port of the CS 4.12/4.13 `udrl_sleepmask_dev` reference. This document covers the architectural quirks, gotchas, and divergences you will encounter developing the UDRL and sleepmask for Mythic instead of CS.
