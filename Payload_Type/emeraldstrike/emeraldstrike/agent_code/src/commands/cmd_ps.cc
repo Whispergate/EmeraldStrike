@@ -137,7 +137,7 @@ VOID cmd_ps(PINSTANCE inst, PPARSER args, PPACKAGE response) {
         (fn_LookupAccountSidW_t)resolve_function((PVOID)h_adv, hash_string_djb2(XSTR("LookupAccountSidW")));
 
     // SID -> name cache
-    SID_CACHE cache[24];
+    static SID_CACHE cache[24];
     int cache_count = 0;
 
     for (DWORD i = 0; i < count; i++) {

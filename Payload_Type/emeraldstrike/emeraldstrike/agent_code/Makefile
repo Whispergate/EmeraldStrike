@@ -14,6 +14,9 @@ CFLAGS += -fms-extensions -fno-builtin -Iinclude -Wl,-Tscripts/linker.ld
 # Detect mingw-w64 C++ headers for cross-compilation
 GCC_X64_CXX := $(wildcard /usr/lib/gcc/x86_64-w64-mingw32/*/include/c++)
 GCC_X86_CXX := $(wildcard /usr/lib/gcc/i686-w64-mingw32/*/include/c++)
+# x86 clang emits _alloca calls for frames >4KB; -nostdlib excludes the CRT
+# that provides it, so pull the single chkstk member from libgcc explicitly
+LIBGCC_X86 := $(firstword $(wildcard /usr/lib/gcc/i686-w64-mingw32/*/libgcc.a))
 ifneq ($(GCC_X64_CXX),)
   GCC_X64_DIR := $(firstword $(GCC_X64_CXX))
   CFLAGS_X64_INC := -isystem $(GCC_X64_DIR) -isystem $(GCC_X64_DIR)/x86_64-w64-mingw32
@@ -76,7 +79,7 @@ x64: nasm64 $(OBJ64)
 
 x86: nasm86 $(OBJ86)
 	@ echo "compiling x86 project"
-	@ $(CCX86) bin/obj/*.x86.obj -o bin/$(NAME).x86.exe $(CFLAGS) $(CFLAGS_X86_INC)
+	@ $(CCX86) bin/obj/*.x86.obj -o bin/$(NAME).x86.exe $(CFLAGS) $(CFLAGS_X86_INC) $(LIBGCC_X86)
 	@ strip --strip-all bin/$(NAME).x86.exe
 	@ objcopy --dump-section .text=bin/$(NAME).x86.bin bin/$(NAME).x86.exe
 

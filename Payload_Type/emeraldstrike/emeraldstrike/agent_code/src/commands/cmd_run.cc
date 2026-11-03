@@ -16,7 +16,7 @@ VOID cmd_run(PINSTANCE inst, PPARSER args, PPACKAGE response) {
     }
 
     // quote the executable if it contains spaces and isn't quoted already
-    char cmd_line[2048] = {0};
+    static char cmd_line[2048] = {0};
     DWORD pos = 0;
     BOOL has_space = FALSE;
     for (DWORD i = 0; i < exe_len; i++) {
@@ -82,7 +82,7 @@ VOID cmd_run(PINSTANCE inst, PPARSER args, PPACKAGE response) {
     // Non-blocking drain: PeekNamedPipe + bounded wait. A blocking ReadFile
     // here hangs forever if conhost (spawned for the child console) inherits
     // the write handle and outlives cmd.exe.
-    BYTE read_buf[4096];
+    static BYTE read_buf[4096];
     DWORD read_bytes;
     DWORD waited = 0;
     while (waited < 60000) {
