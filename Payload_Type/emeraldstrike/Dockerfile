@@ -1,4 +1,4 @@
-FROM itsafeaturemythic/mythic_python_base:latest
+FROM itsafeaturemythic/mythic_python_dotnet:latest
 
 RUN apt-get clean
 RUN dpkg --add-architecture i386

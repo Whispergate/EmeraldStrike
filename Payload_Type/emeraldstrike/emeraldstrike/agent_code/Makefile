@@ -9,7 +9,12 @@ CFLAGS := -Os -nostdlib -fno-asynchronous-unwind-tables -std=c++20
 CFLAGS += -fno-ident -fpack-struct=8 -falign-functions=1 -s -w -mno-sse
 CFLAGS += -ffunction-sections -fno-zero-initialized-in-bss -falign-jumps=1 -falign-labels=1 -fno-jump-tables
 CFLAGS += -Wl,-s,--strip-all,--enable-stdcall-fixup -masm=intel -fno-exceptions
-CFLAGS += -fms-extensions -fno-builtin -Iinclude -Wl,-Tscripts/linker.ld
+CFLAGS += -fms-extensions -fno-builtin -Iinclude
+
+# Linker script is applied only at link time so the x86 probe link can swap in
+# linker_probe.ld (same layout, different VMA) without conflicting -T scripts.
+LDSCRIPT     := -Wl,-Tscripts/linker.ld
+LDSCRIPT_PR  := -Wl,-Tscripts/linker_probe.ld
 
 # Detect mingw-w64 C++ headers for cross-compilation
 GCC_X64_CXX := $(wildcard /usr/lib/gcc/x86_64-w64-mingw32/*/include/c++)
@@ -48,6 +53,12 @@ endif
 DEFINES ?=
 CFLAGS  += $(DEFINES)
 
+# x86 needs explicit PIC. Without it clang emits absolute addresses for static
+# data (XSTR string buffers, const tables), which break once the shellcode is
+# copied to an arbitrary base - the first XSTR access reads garbage and AVs.
+# x64 gets RIP-relative addressing by default, so no flag is needed there.
+PICFLAG_X86 := -fPIC
+
 SRC    := $(wildcard src/*.cc) $(wildcard src/commands/*.cc) $(wildcard src/transport/*.cc) $(filter-out src/evasion/clr_bootstrap.cc src/evasion/bof_bootstrap.cc, $(wildcard src/evasion/*.cc))
 OBJ64  := $(SRC:%.cc=%.x64.obj)
 OBJ86  := $(SRC:%.cc=%.x86.obj)
@@ -70,15 +81,17 @@ x86-debug: x86
 
 x64: nasm64 $(OBJ64)
 	@ echo "compiling x64 project"
-	@ $(CCX64) bin/obj/*.x64.obj -o bin/$(NAME).x64.exe $(CFLAGS) $(CFLAGS_X64_INC)
+	@ $(CCX64) bin/obj/*.x64.obj -o bin/$(NAME).x64.exe $(CFLAGS) $(LDSCRIPT) $(CFLAGS_X64_INC)
 	@ strip --strip-all bin/$(NAME).x64.exe
 	@ objcopy --dump-section .text=bin/$(NAME).x64.bin bin/$(NAME).x64.exe
 
 x86: nasm86 $(OBJ86)
 	@ echo "compiling x86 project"
-	@ $(CCX86) bin/obj/*.x86.obj -o bin/$(NAME).x86.exe $(CFLAGS) $(CFLAGS_X86_INC)
+	@ $(CCX86) bin/obj/*.x86.obj -o bin/$(NAME).x86.exe $(CFLAGS) $(PICFLAG_X86) $(LDSCRIPT) $(CFLAGS_X86_INC)
 	@ strip --strip-all bin/$(NAME).x86.exe
 	@ objcopy --dump-section .text=bin/$(NAME).x86.bin bin/$(NAME).x86.exe
+	@ $(CCX86) bin/obj/*.x86.obj -o bin/$(NAME).x86.probe.exe $(CFLAGS) $(PICFLAG_X86) $(LDSCRIPT_PR) $(CFLAGS_X86_INC)
+	@ objcopy --dump-section .text=bin/$(NAME).x86.probe.bin bin/$(NAME).x86.probe.exe
 
 dll-x64: $(DLLOBJS64)
 	@ echo "compiling x64 DLL for UDRL"
@@ -92,7 +105,7 @@ dll-x64: $(DLLOBJS64)
 
 %.x86.obj: %.cc
 	@ echo "-> compiling $< to $(notdir $@)"
-	@ $(CCX86) -o bin/obj/$(notdir $@) -c $< $(CFLAGS) $(CFLAGS_X86_INC)
+	@ $(CCX86) -o bin/obj/$(notdir $@) -c $< $(CFLAGS) $(PICFLAG_X86) $(CFLAGS_X86_INC)
 
 %.dll64.obj: %.cc
 	@ echo "-> compiling $< to $(notdir $@) [DLL]"

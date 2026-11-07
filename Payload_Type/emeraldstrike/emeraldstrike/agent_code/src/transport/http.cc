@@ -19,19 +19,23 @@
 static BOOL _http_request(PINSTANCE inst, LPCSTR verb, LPCSTR path,
                           BYTE* body, DWORD body_len,
                           BYTE** response, DWORD* resp_len) {
-    if (!inst->Win32.InternetOpenA) return FALSE;
+    if (!inst->Win32.InternetOpenA) { TRACE(inst, "http: InternetOpenA unresolved"); return FALSE; }
+    TRACE(inst, "http: InternetOpenA calling");
 
     HINTERNET hSession = inst->Win32.InternetOpenA(
         inst->Http.user_agent, 0, NULL, NULL, 0);
-    if (!hSession) return FALSE;
+    if (!hSession) { TRACE(inst, "http: InternetOpen failed"); return FALSE; }
+    TRACE(inst, "http: InternetConnect calling");
 
     HINTERNET hConnect = inst->Win32.InternetConnectA(
         hSession, inst->Http.host, (WORD)inst->Http.port,
         NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0);
     if (!hConnect) {
+        TRACE(inst, "http: InternetConnect failed");
         inst->Win32.InternetCloseHandle(hSession);
         return FALSE;
     }
+    TRACE(inst, "http: HttpOpenRequest calling");
 
     DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_KEEP_CONNECTION;
     if (inst->Http.use_ssl)
@@ -54,11 +58,13 @@ static BOOL _http_request(PINSTANCE inst, LPCSTR verb, LPCSTR path,
     BOOL sent = inst->Win32.HttpSendRequestA(
         hRequest, NULL, 0, body, body_len);
     if (!sent) {
+        TRACE(inst, "http: HttpSendRequest failed");
         inst->Win32.InternetCloseHandle(hRequest);
         inst->Win32.InternetCloseHandle(hConnect);
         inst->Win32.InternetCloseHandle(hSession);
         return FALSE;
     }
+    TRACE(inst, "http: HttpSendRequest ok, reading");
 
     DWORD total_size = 0;
     BYTE* total_buf = NULL;

