@@ -16,6 +16,14 @@ static const unsigned char CONFIG_BYTES[] = { %CONFIG_BYTES% };
 // Sleepmask COFF data - stamped by builder (UDRL mode only)
 %SLEEPMASK_COFF_DEFINE%
 
+// CLR bootstrap PIC shellcode for fork-and-run execute_assembly
+// Compiled from src/evasion/clr_bootstrap.cc and stamped by builder
+%CLR_BOOTSTRAP_DEFINE%
+
+// BOF bootstrap PIC shellcode for fork-and-run inline_execute
+// Compiled from src/evasion/bof_bootstrap.cc and stamped by builder
+%BOF_BOOTSTRAP_DEFINE%
+
 // Sleep mask type constants
 #define MASK_NONE    0
 #define MASK_DEFAULT 1
@@ -73,12 +81,5 @@ static const unsigned char CONFIG_BYTES[] = { %CONFIG_BYTES% };
 #define INCLUDE_CMD_GETPRIVS
 #define INCLUDE_CMD_PPID
 #define INCLUDE_CMD_BLOCKDLLS
-#define INCLUDE_CMD_LINK
-#define INCLUDE_CMD_UNLINK
-#define INCLUDE_CMD_PSEXEC
-#define INCLUDE_CMD_PSEXEC_PSH
-#define INCLUDE_CMD_WMIEXEC
-#define INCLUDE_CMD_DCOMEXEC
-#define INCLUDE_CMD_WINRM
 
 #endif // EMERALDSTRIKE_CONFIG_H

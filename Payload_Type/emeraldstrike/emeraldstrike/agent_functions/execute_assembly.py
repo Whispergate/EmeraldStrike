@@ -46,6 +46,18 @@ class ExecuteAssemblyArguments(TaskArguments):
                     ParameterGroupInfo(required=False, group_name="New", ui_position=2),
                 ],
             ),
+            CommandParameter(
+                name="fork_and_run",
+                cli_name="ForkAndRun",
+                display_name="Fork & Run",
+                type=ParameterType.Boolean,
+                description="Run in a sacrificial process (fork-and-run) instead of inline. Uses the configured spawnto process.",
+                default_value=False,
+                parameter_group_info=[
+                    ParameterGroupInfo(required=False, group_name="Default", ui_position=3),
+                    ParameterGroupInfo(required=False, group_name="New", ui_position=3),
+                ],
+            ),
         ]
 
     async def get_assembly_files(self, inputMsg: PTRPCDynamicQueryFunctionMessage) -> PTRPCDynamicQueryFunctionMessageResponse:
@@ -77,7 +89,7 @@ class ExecuteAssemblyCommand(CommandBase):
     cmd = "execute_assembly"
     needs_admin = False
     help_cmd = "execute_assembly -Assembly <assembly.exe> -Arguments \"arg1 arg2\""
-    description = "Execute a .NET assembly in-process via CLR hosting."
+    description = "Execute a .NET assembly via CLR hosting. Supports inline (default) or fork-and-run mode."
     version = 1
     supported_ui_features = []
     author = "@Lavender-exe"
@@ -136,9 +148,17 @@ class ExecuteAssemblyCommand(CommandBase):
                                   ParameterGroupInfo(group_name="New"),
                               ])
 
+        fork = taskData.args.get_arg("fork_and_run") or False
+        taskData.args.add_arg("fork_and_run_int", 1 if fork else 0, ParameterType.Number,
+                              parameter_group_info=[
+                                  ParameterGroupInfo(group_name="Default"),
+                                  ParameterGroupInfo(group_name="New"),
+                              ])
+
         args_str = taskData.args.get_arg("arguments") or ""
         asm_len = len(file_content.Content)
-        response.DisplayParams = f"-Assembly {assembly_name} ({asm_len} bytes) -Arguments '{args_str}'"
+        mode_tag = " [fork-and-run]" if fork else " [inline]"
+        response.DisplayParams = f"-Assembly {assembly_name} ({asm_len} bytes) -Arguments '{args_str}'{mode_tag}"
 
         return response
 

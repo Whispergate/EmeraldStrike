@@ -28,109 +28,6 @@ TLV_TYPE_EXT_IP    = 0x17
 TLV_TYPE_PROCNAME  = 0x18
 TLV_TYPE_OS_INFO   = 0x19
 
-# ── Action bytes for P2P link/delegate protocol (matches Starburst) ──
-ACTION_LINK_ADD    = 0x05  # agent → Mythic: new peer linked
-ACTION_LINK_MSG    = 0x06  # bidirectional: relay delegate tasks/responses
-ACTION_LINK_REMOVE = 0x07  # agent → Mythic: peer unlinked
-
-TLV_TYPE_DELEGATES = 0x1B  # delegate blobs piggybacked on get_tasking TLV
-
-C2_PROFILE_SMB = 0x00
-C2_PROFILE_TCP = 0x01
-C2_PROFILE_NAMES = {0x00: "smb", 0x01: "tcp"}
-
-# Tracks which c2_profile each linked peer uses (keyed by agent UUID)
-_link_profiles = {}
-
-
-class _Parser:
-    """Simple binary parser for action-byte delegate messages."""
-    def __init__(self, data):
-        self.data = data
-        self.pos = 0
-
-    def byte(self):
-        v = self.data[self.pos]
-        self.pos += 1
-        return v
-
-    def int32(self):
-        v = struct.unpack(">I", self.data[self.pos:self.pos + 4])[0]
-        self.pos += 4
-        return v
-
-    def string(self):
-        slen = self.int32()
-        s = self.data[self.pos:self.pos + slen].decode("utf-8", errors="replace")
-        self.pos += slen
-        return s
-
-    def bytes_field(self):
-        blen = self.int32()
-        b = self.data[self.pos:self.pos + blen]
-        self.pos += blen
-        return b
-
-    def remaining(self):
-        return len(self.data) - self.pos
-
-
-def _parse_delegate_messages(data):
-    """Parse ACTION_LINK_ADD/MSG/REMOVE binary messages into Mythic delegate dicts."""
-    p = _Parser(data)
-    action = p.byte()
-    messages = []
-
-    if action == ACTION_LINK_ADD:
-        c2_type = p.byte()
-        c2_profile = C2_PROFILE_NAMES.get(c2_type, "smb")
-        link_id = p.int32()
-        agent_uuid = p.string()
-        msg_data = p.bytes_field()
-        _link_profiles[agent_uuid] = c2_profile
-        messages.append({
-            "c2_profile": c2_profile,
-            "message": msg_data.decode("utf-8", errors="replace"),
-            "uuid": agent_uuid,
-        })
-
-    elif action == ACTION_LINK_MSG:
-        while p.remaining() > 0:
-            agent_uuid = p.string()
-            msg_data = p.bytes_field()
-            c2_profile = _link_profiles.get(agent_uuid, "smb")
-            messages.append({
-                "c2_profile": c2_profile,
-                "message": msg_data.decode("utf-8", errors="replace"),
-                "uuid": agent_uuid,
-            })
-
-    elif action == ACTION_LINK_REMOVE:
-        link_id = p.int32()
-        agent_uuid = p.string()
-        c2_profile = _link_profiles.pop(agent_uuid, "smb")
-        messages.append({
-            "c2_profile": c2_profile,
-            "message": "",
-            "uuid": agent_uuid,
-            "mythic_uuid": agent_uuid,
-        })
-
-    return messages
-
-
-def _pack_delegate_messages(delegates):
-    """Pack Mythic delegate dicts into ACTION_LINK_MSG binary format."""
-    result = struct.pack("B", ACTION_LINK_MSG)
-    for d in delegates:
-        uuid_bytes = d.get("uuid", "").encode("utf-8")
-        result += struct.pack(">I", len(uuid_bytes)) + uuid_bytes
-        msg = d.get("message", "")
-        if isinstance(msg, str):
-            msg = msg.encode("utf-8")
-        result += struct.pack(">I", len(msg)) + msg
-    return result
-
 # Task id -> agent-registered file_id, shared between the translator (which sees
 # the file_id Mythic returns in get_tasking responses) and the payload container
 # code (screenshot.py process_response), which runs in the same container.
@@ -245,13 +142,13 @@ _CMD_SCHEMAS = {
     "rm":              [("path", "string")],
     "mkdir":           [("path", "string")],
     "inject":          [("pid", "int32"), ("shellcode_data", "b64")],
-    "inline_execute":  [("bof_data", "b64"), ("bof_args", "b64")],
+    "inline_execute":  [("fork_and_run_int", "int32"), ("bof_data", "b64"), ("bof_args", "b64")],
     "config":          [("action", "string"), ("key", "string"), ("value", "int32")],
     "spawnto_x64":     [("application", "string"), ("arguments", "string")],
     "spawnto_x86":     [("application", "string"), ("arguments", "string")],
     "spawn":           [("pid", "int32"), ("shellcode_data", "b64")],
     "argue":             [("action", "string"), ("fake_args", "string")],
-    "execute_assembly":  [("assembly_data", "b64"), ("arguments", "string")],
+    "execute_assembly":  [("fork_and_run_int", "int32"), ("assembly_data", "b64"), ("arguments", "string")],
     "powerpick":         [("runner_data", "b64"), ("script", "string")],
     "exit":              [("method_int", "int32")],
     "run":               [("executable", "string"), ("arguments", "string")],
@@ -261,55 +158,12 @@ _CMD_SCHEMAS = {
     "make_token":        [("domain", "string"), ("username", "string"), ("password", "string")],
     "blockdlls":         [("action", "string")],
     "argue":             [("action", "string"), ("fake_args", "string")],
-    "psexec":            [("host", "string"), ("file_data", "b64"), ("delete_after", "int32")],
-    "psexec_psh":        [("host", "string"), ("enc_cmd", "string")],
-    "wmiexec":           [("host", "string"), ("command", "string")],
-    "dcomexec":          [("host", "string"), ("command", "string")],
-    "winrm":             [("host", "string"), ("command", "string"), ("username", "string"), ("password", "string")],
-}
-
-# Custom parameter packers for commands with nested JSON params (connection_info, link_info)
-def _pack_link_params(params):
-    """Extract host + pipename from Mythic's ConnectionInfo structure."""
-    connection_info = params.get("connection_info", {})
-    if isinstance(connection_info, str):
-        try:
-            connection_info = json.loads(connection_info)
-        except Exception:
-            connection_info = {}
-    host = connection_info.get("host", "")
-    c2_profile = connection_info.get("c2_profile", {})
-    c2_params = c2_profile.get("parameters", {})
-    pipename = c2_params.get("pipename", "")
-    return _pack_string(host) + _pack_string(pipename)
-
-
-def _pack_unlink_params(params):
-    """Extract callback_uuid from Mythic's LinkInfo structure."""
-    link_info = params.get("link_info", {})
-    if isinstance(link_info, str):
-        try:
-            link_info = json.loads(link_info)
-        except Exception:
-            link_info = {}
-    callback_uuid = link_info.get("callback_uuid", "")
-    return _pack_string(callback_uuid)
-
-
-_CUSTOM_PACKERS = {
-    "link": _pack_link_params,
-    "unlink": _pack_unlink_params,
 }
 
 
 def _pack_params(command, params):
     if not isinstance(params, dict) or not params:
         return b""
-
-    # Check for custom packer first (link, unlink)
-    custom = _CUSTOM_PACKERS.get(command)
-    if custom:
-        return custom(params)
 
     schema = _CMD_SCHEMAS.get(command)
     if schema:
@@ -371,33 +225,19 @@ class EmeraldStrikeTranslator(TranslationContainer):
 
             buf = b""
             action = msg.get("action", "")
-            if action == "get_tasking":
-                tasks = msg.get("tasks") or []
-                if tasks:
-                    task = tasks[0]
-                    command = task.get("command", "")
-                    buf += _pack_tlv(TLV_TYPE_COMMAND, command)
-                    buf += _pack_tlv(TLV_TYPE_TASKID, task.get("id", ""))
-                    params = task.get("parameters", "")
-                    if isinstance(params, str):
-                        try:
-                            params = json.loads(params)
-                        except Exception:
-                            pass
-                    params_packed = _pack_params(command, params) if isinstance(params, dict) else b""
-                    buf += _pack_tlv(TLV_TYPE_DATA, params_packed)
-
-                # Append ACTION_LINK_MSG for delegate tasks - always check,
-                # even when there are no parent tasks (Mythic sends delegates
-                # independently of parent tasking)
-                delegates = msg.get("delegates") or []
-                if delegates:
-                    import sys; print(f"ES-TRANSLATOR to_c2: packing {len(delegates)} delegate(s)", flush=True, file=sys.stderr)
-                    # Pack delegates as TLV_DELEGATES (0x1B) - each delegate is
-                    # length-prefixed ACTION_LINK_MSG binary, same as from_c2 path
-                    del_packed = _pack_delegate_messages(delegates)
-                    buf += _pack_tlv(TLV_TYPE_DELEGATES, del_packed)
-
+            if action == "get_tasking" and "tasks" in msg and msg["tasks"]:
+                task = msg["tasks"][0]
+                command = task.get("command", "")
+                buf += _pack_tlv(TLV_TYPE_COMMAND, command)
+                buf += _pack_tlv(TLV_TYPE_TASKID, task.get("id", ""))
+                params = task.get("parameters", "")
+                if isinstance(params, str):
+                    try:
+                        params = json.loads(params)
+                    except Exception:
+                        pass
+                params_packed = _pack_params(command, params) if isinstance(params, dict) else b""
+                buf += _pack_tlv(TLV_TYPE_DATA, params_packed)
             elif action == "checkin":
                 if "id" in msg:
                     buf += _pack_tlv(TLV_TYPE_TASKID, msg["id"])
@@ -409,9 +249,6 @@ class EmeraldStrikeTranslator(TranslationContainer):
                     buf += _pack_tlv(TLV_TYPE_TASKID, msg["id"])
                 buf += _pack_tlv(TLV_TYPE_COMMAND, action)
 
-            import sys; print(f"ES-TRANSLATOR to_c2: action={action} buf_len={len(buf)} keys={list(msg.keys())[:10]}", flush=True, file=sys.stderr)
-            if msg.get("delegates"):
-                print(f"ES-TRANSLATOR to_c2: HAS DELEGATES: {len(msg['delegates'])}", flush=True, file=sys.stderr)
             response.Message = buf
         except Exception as e:
             logger.error(f"translate_to_c2_format error: {e}")
@@ -433,25 +270,6 @@ class EmeraldStrikeTranslator(TranslationContainer):
                 response.Error = "empty message after UUID stripping"
                 return response
 
-            # ── Action-byte delegate messages (P2P link protocol) ──
-            # If the first byte is an action byte, this is a delegate message,
-            # not a regular TLV command. Parse it and wrap as get_tasking with delegates.
-            if len(raw) > 0 and raw[0] in (ACTION_LINK_ADD, ACTION_LINK_MSG, ACTION_LINK_REMOVE):
-                logger.info(f"P2P delegate message: action=0x{raw[0]:02x} len={len(raw)}")
-                try:
-                    delegates = _parse_delegate_messages(raw)
-                    response.Message = {
-                        "action": "get_tasking",
-                        "tasking_size": -1,
-                        "delegates": delegates,
-                    }
-                    return response
-                except Exception as e:
-                    logger.error(f"delegate message parse error: {e}")
-                    response.Success = False
-                    response.Error = str(e)
-                    return response
-
             try:
                 response.Message = json.loads(raw)
                 return response
@@ -459,9 +277,6 @@ class EmeraldStrikeTranslator(TranslationContainer):
                 pass
 
             tlvs = _unpack_tlvs(raw)
-            import sys; print(f"ES-TRANSLATOR from_c2: {len(raw)} bytes, TLV keys: {[hex(k) for k in tlvs.keys()]}", flush=True, file=sys.stderr)
-            if 0x7F in tlvs:
-                print(f"ES-TRANSLATOR AGENT-DEBUG: {tlvs[0x7F].decode('utf-8', errors='replace')}", flush=True, file=sys.stderr)
             msg = {}
 
             if TLV_TYPE_UUID in tlvs and TLV_TYPE_HOST in tlvs:
@@ -506,36 +321,6 @@ class EmeraldStrikeTranslator(TranslationContainer):
                 msg["action"] = cmd
                 if cmd == "get_tasking":
                     msg["tasking_size"] = 1
-
-            # Parse delegate blobs piggybacked on get_tasking via TLV_DELEGATES
-            if TLV_TYPE_DELEGATES in tlvs:
-                del_data = tlvs[TLV_TYPE_DELEGATES]
-                print(f"ES-TRANSLATOR TLV_DELEGATES: {len(del_data)} bytes, first_bytes={del_data[:20].hex()}", flush=True, file=sys.stderr)
-                delegates = []
-                dpos = 0
-                while dpos + 4 < len(del_data):
-                    frame_len = struct.unpack(">I", del_data[dpos:dpos+4])[0]
-                    dpos += 4
-                    if frame_len == 0 or dpos + frame_len > len(del_data):
-                        print(f"ES-TRANSLATOR delegate frame bad: frame_len={frame_len} remaining={len(del_data)-dpos}", flush=True, file=sys.stderr)
-                        break
-                    sub = del_data[dpos:dpos+frame_len]
-                    dpos += frame_len
-                    print(f"ES-TRANSLATOR delegate sub: {len(sub)} bytes, first_byte=0x{sub[0]:02x}", flush=True, file=sys.stderr)
-                    # Each sub is a raw ACTION_LINK_ADD/MSG/REMOVE binary blob
-                    try:
-                        sub_delegates = _parse_delegate_messages(sub)
-                        for sd in sub_delegates:
-                            print(f"ES-TRANSLATOR delegate uuid={sd.get('uuid','')} msg_len={len(sd.get('message',''))}", flush=True, file=sys.stderr)
-                        delegates.extend(sub_delegates)
-                        print(f"ES-TRANSLATOR parsed {len(sub_delegates)} delegate(s)", flush=True, file=sys.stderr)
-                    except Exception as e:
-                        print(f"ES-TRANSLATOR delegate parse error: {e}", flush=True, file=sys.stderr)
-                if delegates:
-                    msg["delegates"] = delegates
-                    for d in delegates:
-                        m = d.get("message", "")
-                        print(f"ES-TRANSLATOR delegate msg type={type(m).__name__} len={len(m)} first20hex={m[:20].encode('utf-8','replace').hex() if isinstance(m,str) else m[:20].hex()}", flush=True, file=sys.stderr)
 
             if TLV_TYPE_TASKID in tlvs:
                 msg["id"] = tlvs[TLV_TYPE_TASKID].decode("utf-8")
