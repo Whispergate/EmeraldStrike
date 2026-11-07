@@ -208,6 +208,9 @@ class EmeraldStrike(PayloadType):
             choices=["none", "wmi", "rpc", "custom"],
             default_value="none",
             description="Callstack spoofing (x64 only): none (disabled), wmi (WMI callback chain), rpc (RPC dispatch chain), custom (operator-defined module)",
+            hide_conditions=[
+                HideCondition(name="loader_type", operand=HideConditionOperand.EQ, value="udrl-vs"),
+            ],
         ),
         BuildParameter(
             name="callstack_spoof_module",
@@ -228,6 +231,7 @@ class EmeraldStrike(PayloadType):
             description="Module stomping (x64 only): load a signed sacrifice DLL and copy the agent into its .text section so all return addresses point into a file-backed, signed module.",
             hide_conditions=[
                 HideCondition(name="architecture", operand=HideConditionOperand.NotEQ, value="x64"),
+                HideCondition(name="loader_type", operand=HideConditionOperand.EQ, value="udrl-vs"),
             ],
         ),
     ]
@@ -748,9 +752,17 @@ class EmeraldStrike(PayloadType):
             defines.append("#define USE_WINHTTP")
 
         # Callstack spoofing (x64 only - desync/SilentMoonwalk)
+        # Not available under UDRL: the desync ROP stub assumes the standalone
+        # PIC entry path, so force-none regardless of any stale UI value.
+        try:
+            loader_type = self.get_parameter("loader_type")
+        except Exception:
+            loader_type = "default"
         try:
             cs_spoof = self.get_parameter("callstack_spoof")
         except Exception:
+            cs_spoof = "none"
+        if loader_type == "udrl-vs":
             cs_spoof = "none"
         spoof_map = {"none": "SPOOF_NONE", "wmi": "SPOOF_WMI", "rpc": "SPOOF_RPC", "custom": "SPOOF_CUSTOM"}
         spoof_mode = spoof_map.get(cs_spoof, "SPOOF_NONE")
@@ -765,10 +777,12 @@ class EmeraldStrike(PayloadType):
                 if cs_module:
                     defines.append(f'#define CALLSTACK_SPOOF_CUSTOM_MODULE "{cs_module}"')
 
-        # Module stomping (x64 only)
+        # Module stomping (x64 only) - disabled under UDRL along with spoofing
         try:
             module_stomp = self.get_parameter("module_stomp")
         except Exception:
+            module_stomp = False
+        if loader_type == "udrl-vs":
             module_stomp = False
         if module_stomp:
             defines.append("#define INCLUDE_EVASION_MODULE_STOMP")

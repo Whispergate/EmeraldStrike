@@ -137,3 +137,34 @@ class TestBuilder:
 
     def test_killdate_fallback_28d(self):
         assert "timedelta(days=28)" in self.b
+
+
+class TestUdrlDisablesEvasion:
+    """Spoofing/stomping must be hidden and force-disabled under UDRL builds."""
+
+    def setup_method(self):
+        self.b = read(BUILDER)
+
+    def test_spoof_param_hidden_for_udrl(self):
+        assert 'HideCondition(name="loader_type", operand=HideConditionOperand.EQ, value="udrl-vs")' in self.b
+
+    def test_stomp_param_hidden_for_udrl(self):
+        # both hide conditions on module_stomp (architecture + loader_type)
+        stomp = self.b[self.b.index('"module_stomp"'):]
+        stomp = stomp[:stomp.index("},")]
+        assert 'operand=HideConditionOperand.EQ, value="udrl-vs"' in stomp
+
+    def test_spoof_forced_none_under_udrl(self):
+        assert 'if loader_type == "udrl-vs":\n            cs_spoof = "none"' in self.b
+
+    def test_stomp_forced_off_under_udrl(self):
+        assert 'if loader_type == "udrl-vs":\n            module_stomp = False' in self.b
+
+    def test_dll_target_links_desync_stub(self):
+        makefile = read(AGENT, "Makefile")
+        dll = makefile[makefile.index("dll-x64:"):]
+        dll = dll[:dll.index("\n\n")]
+        assert "nasm64" in dll and "desync_spoof.x64.obj" in dll
+        # entry.x64.obj must NOT be linked into the DLL (DllMain is the entry;
+        # main_entry doesn't exist under DLL_MODE)
+        assert "entry.x64.obj" not in dll

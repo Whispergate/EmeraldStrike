@@ -93,9 +93,9 @@ x86: nasm86 $(OBJ86)
 	@ $(CCX86) bin/obj/*.x86.obj -o bin/$(NAME).x86.probe.exe $(CFLAGS) $(PICFLAG_X86) $(LDSCRIPT_PR) $(CFLAGS_X86_INC)
 	@ objcopy --dump-section .text=bin/$(NAME).x86.probe.bin bin/$(NAME).x86.probe.exe
 
-dll-x64: $(DLLOBJS64)
+dll-x64: $(DLLOBJS64) nasm64
 	@ echo "compiling x64 DLL for UDRL"
-	@ $(CCX64) bin/obj/*.dll64.obj -o bin/$(NAME).x64.dll -shared $(DLLCFLAGS) $(CFLAGS_X64_INC) \
+	@ $(CCX64) bin/obj/*.dll64.obj bin/obj/desync_spoof.x64.obj -o bin/$(NAME).x64.dll -shared $(DLLCFLAGS) $(CFLAGS_X64_INC) \
 	  -Wl,-s,--enable-stdcall-fixup,-e,DllMain,--exclude-all-symbols,-Map=bin/$(NAME).x64.map
 	@ strip --strip-unneeded bin/$(NAME).x64.dll
 
