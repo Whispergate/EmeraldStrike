@@ -47,7 +47,7 @@ def _build_psrunner() -> bytes:
 
     Every invocation produces a unique binary: random class name, random
     assembly name, random GUID, random file version. This defeats static
-    signature matching entirely — the PE, metadata tables, #Strings heap,
+    signature matching entirely - the PE, metadata tables, #Strings heap,
     and version-info resource are all different on every build.
 
     Requires `csc` or `dotnet` in the container (mythic_python_dotnet image).
@@ -109,14 +109,14 @@ def _build_psrunner() -> bytes:
                 break
 
         if not sma_dll:
-            # SMA not found — fall back to binary patching of the static blob
+            # SMA not found - fall back to binary patching of the static blob
             logger.info("System.Management.Automation.dll not found; falling back to metadata patching")
             return _patch_psrunner_metadata()
 
         refs = ["-r:" + sma_dll]
 
         if csc and csc.endswith(".dll"):
-            # Roslyn csc.dll — invoke via dotnet
+            # Roslyn csc.dll - invoke via dotnet
             cmd = ["dotnet", csc, "-nologo", "-optimize+", "-target:exe",
                    f"-out:{out_path}"] + refs + [cs_path]
         else:

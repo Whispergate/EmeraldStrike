@@ -43,7 +43,7 @@ _get_instance:
     mov     rax, [rax]
     ret
 
-section .text$C
+section .instdata
 
 __Instance_offset:  dd 0
 __Instance:         dq 0

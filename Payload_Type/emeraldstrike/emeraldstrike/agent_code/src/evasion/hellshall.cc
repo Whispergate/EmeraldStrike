@@ -20,7 +20,7 @@
 #define ZERO_CHECK_OFF1     6
 #define ZERO_CHECK_OFF2     7
 #else
-// x86 WOW64: B8 xx xx 00 00 (mov eax, SSN) — 5-byte stub header, 20-byte total
+// x86 WOW64: B8 xx xx 00 00 (mov eax, SSN) - 5-byte stub header, 20-byte total
 #undef  SYSCALL_STUB_SIZE
 #define SYSCALL_STUB_SIZE   0x14
 #define CLEAN_STUB_BYTE0    0xB8   // mov eax, SSN
@@ -116,7 +116,7 @@ BOOL hellshall_fetch(PVOID ntdll_base, DWORD dwSysHash, PNT_SYSCALL pNtSys) {
 
         // ─── Clean (unhooked) syscall stub ───
         // x64 pattern: 4C 8B D1  B8 xx xx 00 00  (mov r10, rcx; mov eax, SSN)
-        // x86 pattern: B8 xx xx 00 00  (mov eax, SSN) — WOW64 and native x86
+        // x86 pattern: B8 xx xx 00 00  (mov eax, SSN) - WOW64 and native x86
 #ifdef _WIN64
         if (*((PBYTE)pFuncAddress)     == 0x4C &&
             *((PBYTE)pFuncAddress + 1) == 0x8B &&

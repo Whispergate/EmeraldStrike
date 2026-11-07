@@ -200,6 +200,35 @@ class EmeraldStrike(PayloadType):
                 HideCondition(name="indirect_syscalls", operand=HideConditionOperand.EQ, value=False),
             ],
         ),
+        BuildParameter(
+            name="callstack_spoof",
+            group_name="Evasion",
+            parameter_type=BuildParameterType.ChooseOne,
+            choices=["none", "wmi", "rpc", "custom"],
+            default_value="none",
+            description="Callstack spoofing (x64 only): none (disabled), wmi (WMI callback chain), rpc (RPC dispatch chain), custom (operator-defined module)",
+        ),
+        BuildParameter(
+            name="callstack_spoof_module",
+            group_name="Evasion",
+            parameter_type=BuildParameterType.String,
+            default_value="",
+            required=False,
+            description="Custom module name for callstack spoofing frame sources (e.g. 'combase.dll'). Only used when callstack_spoof=custom.",
+            hide_conditions=[
+                HideCondition(name="callstack_spoof", operand=HideConditionOperand.NotEQ, value="custom"),
+            ],
+        ),
+        BuildParameter(
+            name="module_stomp",
+            group_name="Evasion",
+            parameter_type=BuildParameterType.Boolean,
+            default_value=False,
+            description="Module stomping (x64 only): load a signed sacrifice DLL and copy the agent into its .text section so all return addresses point into a file-backed, signed module.",
+            hide_conditions=[
+                HideCondition(name="architecture", operand=HideConditionOperand.NotEQ, value="x64"),
+            ],
+        ),
     ]
 
     build_steps = [
@@ -652,6 +681,32 @@ class EmeraldStrike(PayloadType):
             defines.append("#define USE_WININET")
         else:
             defines.append("#define USE_WINHTTP")
+
+        # Callstack spoofing (x64 only - desync/SilentMoonwalk)
+        try:
+            cs_spoof = self.get_parameter("callstack_spoof")
+        except Exception:
+            cs_spoof = "none"
+        spoof_map = {"none": "SPOOF_NONE", "wmi": "SPOOF_WMI", "rpc": "SPOOF_RPC", "custom": "SPOOF_CUSTOM"}
+        spoof_mode = spoof_map.get(cs_spoof, "SPOOF_NONE")
+        defines.append(f"#define CALLSTACK_SPOOF_MODE {spoof_mode}")
+        if cs_spoof != "none":
+            defines.append("#define INCLUDE_EVASION_CALLSTACK_SPOOF")
+            if cs_spoof == "custom":
+                try:
+                    cs_module = self.get_parameter("callstack_spoof_module")
+                except Exception:
+                    cs_module = ""
+                if cs_module:
+                    defines.append(f'#define CALLSTACK_SPOOF_CUSTOM_MODULE "{cs_module}"')
+
+        # Module stomping (x64 only)
+        try:
+            module_stomp = self.get_parameter("module_stomp")
+        except Exception:
+            module_stomp = False
+        if module_stomp:
+            defines.append("#define INCLUDE_EVASION_MODULE_STOMP")
 
         return "\n".join(defines)
 

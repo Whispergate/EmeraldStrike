@@ -40,9 +40,20 @@ static const unsigned char CONFIG_BYTES[] = { %CONFIG_BYTES% };
 #define INJECT_APC     1
 #define INJECT_SECTION 2
 #define INJECT_CUSTOM  3
+#define INJECT_HELLSHALL 4
 
 #ifndef INJECTION_TECHNIQUE
 #define INJECTION_TECHNIQUE INJECT_CRT
+#endif
+
+// Callstack spoofing mode constants
+#define SPOOF_NONE    0
+#define SPOOF_WMI     1
+#define SPOOF_RPC     2
+#define SPOOF_CUSTOM  3
+
+#ifndef CALLSTACK_SPOOF_MODE
+#define CALLSTACK_SPOOF_MODE SPOOF_NONE
 #endif
 
 // Command macros

@@ -113,6 +113,7 @@ dll-x64: $(DLLOBJS64)
 
 nasm64:
 	@ $(ASMCC) -f win64 src/asm/entry.x64.asm -o bin/obj/entry.x64.obj
+	@ $(ASMCC) -f win64 src/asm/desync_spoof.x64.asm -o bin/obj/desync_spoof.x64.obj
 
 nasm86:
 	@ $(ASMCC) -f win32 src/asm/entry.x86.asm -o bin/obj/entry.x86.obj

