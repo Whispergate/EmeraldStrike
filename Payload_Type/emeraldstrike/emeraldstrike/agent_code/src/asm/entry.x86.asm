@@ -68,4 +68,4 @@ _gi_ref:
 
 ___Instance_offset: dd 0
 ___Instance:        dd 0
-___InstanceStorage: times 16384 db 0
+___InstanceStorage: times 24576 db 0

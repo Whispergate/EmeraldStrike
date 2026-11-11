@@ -117,9 +117,9 @@ class EmeraldStrike(PayloadType):
             name="injection_technique",
             group_name="Evasion",
             parameter_type=BuildParameterType.ChooseOne,
-            choices=["crt", "apc", "section", "custom"],
+            choices=["crt", "apc", "section", "cascade", "custom"],
             default_value="crt",
-            description="Injection technique: CRT (CreateRemoteThread), APC (Early Bird), Section (NtCreateSection), Custom (Operator Defined)",
+            description="Injection technique: CRT (CreateRemoteThread), APC (Early Bird), Section (NtCreateSection), Custom (Operator Defined), Cascade (Early Cascade shim-callback hijack; requires spawning a suspended target - use with the spawn command)",
         ),
         BuildParameter(
             name="cleanup",
@@ -229,6 +229,54 @@ class EmeraldStrike(PayloadType):
             parameter_type=BuildParameterType.Boolean,
             default_value=False,
             description="Module stomping (x64 only): load a signed sacrifice DLL and copy the agent into its .text section so all return addresses point into a file-backed, signed module.",
+            hide_conditions=[
+                HideCondition(name="architecture", operand=HideConditionOperand.NotEQ, value="x64"),
+                HideCondition(name="loader_type", operand=HideConditionOperand.EQ, value="udrl-vs"),
+            ],
+        ),
+        BuildParameter(
+            name="module_overload",
+            group_name="Evasion",
+            parameter_type=BuildParameterType.Boolean,
+            default_value=False,
+            description="Module overloading (x64 only, requires module_stomp): map the sacrifice via raw NtCreateSection(SEC_IMAGE) + NtMapViewOfSection - no LoadLibraryW, no VEH, no debug registers. Newer and less battle-tested than the default VEH stomp path.",
+            hide_conditions=[
+                HideCondition(name="architecture", operand=HideConditionOperand.NotEQ, value="x64"),
+                HideCondition(name="loader_type", operand=HideConditionOperand.EQ, value="udrl-vs"),
+                HideCondition(name="module_stomp", operand=HideConditionOperand.EQ, value=False),
+                HideCondition(name="module_shift", operand=HideConditionOperand.EQ, value=True),
+            ],
+        ),
+        BuildParameter(
+            name="module_shift",
+            group_name="Evasion",
+            parameter_type=BuildParameterType.Boolean,
+            default_value=False,
+            description="Module shifting (x64 only): extends module stomping with a backup of the sacrifice region (restored on agent exit, erasing the Modified-Code IoC) and an optional pad offset so the section's first page still matches disk.",
+            hide_conditions=[
+                HideCondition(name="architecture", operand=HideConditionOperand.NotEQ, value="x64"),
+                HideCondition(name="loader_type", operand=HideConditionOperand.EQ, value="udrl-vs"),
+                HideCondition(name="module_stomp", operand=HideConditionOperand.EQ, value=False),
+                HideCondition(name="module_shift", operand=HideConditionOperand.EQ, value=False),
+                HideCondition(name="module_overload", operand=HideConditionOperand.EQ, value=True),
+            ],
+        ),
+        BuildParameter(
+            name="module_shift_pad",
+            group_name="Evasion",
+            parameter_type=BuildParameterType.Boolean,
+            default_value=True,
+            description="Leave the first 0x200 bytes of the sacrifice section original when module shifting (mimics benign partial-overwrite behavior)",
+            hide_conditions=[
+                HideCondition(name="module_shift", operand=HideConditionOperand.NotEQ, value="True"),
+            ],
+        ),
+        BuildParameter(
+            name="shift_bootstrap",
+            group_name="Evasion",
+            parameter_type=BuildParameterType.Boolean,
+            default_value=False,
+            description="Shift-and-restore bootstrap (x64 only): run execute-assembly/BOF bootstraps inside a shifted DLL section in-process and restore the original bytes afterwards - zero residual artifacts, no sacrifice process.",
             hide_conditions=[
                 HideCondition(name="architecture", operand=HideConditionOperand.NotEQ, value="x64"),
                 HideCondition(name="loader_type", operand=HideConditionOperand.EQ, value="udrl-vs"),
@@ -670,7 +718,7 @@ class EmeraldStrike(PayloadType):
             inject = self.get_parameter("injection_technique")
         except Exception:
             inject = "crt"
-        inject_map = {"crt": "INJECT_CRT", "apc": "INJECT_APC", "section": "INJECT_SECTION", "custom": "INJECT_CUSTOM"}
+        inject_map = {"crt": "INJECT_CRT", "apc": "INJECT_APC", "section": "INJECT_SECTION", "custom": "INJECT_CUSTOM", "cascade": "INJECT_CASCADE"}
         defines.append(f"#define INJECTION_TECHNIQUE {inject_map.get(inject, 'INJECT_CRT')}")
 
         try:
@@ -786,6 +834,31 @@ class EmeraldStrike(PayloadType):
             module_stomp = False
         if module_stomp:
             defines.append("#define INCLUDE_EVASION_MODULE_STOMP")
+            # Module overloading (raw NtCreateSection SEC_IMAGE mapping, no loader /
+            # VEH / debug registers). Opt-in: the overload path is newer and less
+            # battle-tested than the VEH stomp (WsmSvc sacrifice crashes, fallback
+            # null-call - documented in the skill reference).
+            try:
+                overload = self.get_parameter("module_overload")
+            except Exception:
+                overload = False
+            if overload:
+                defines.append("#define MODULE_STOMP_OVERLOAD 1")
+
+        # Module shifting REMOVED (2026-11-08): the shift path re-enters the
+        # loader via LoadLibraryExW while the first stomp's hardware debug
+        # registers are still live, causing an unhandled #DB at the
+        # RtlImageNtHeaderEx slot. It needs its own DR lifecycle rework before
+        # it can come back. Parameters are accepted for payload-definition
+        # compatibility but never emit defines.
+        try:
+            self.get_parameter("module_shift")
+        except Exception:
+            pass
+        try:
+            self.get_parameter("shift_bootstrap")
+        except Exception:
+            pass
 
         return "\n".join(defines)
 

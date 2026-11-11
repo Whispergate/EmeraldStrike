@@ -160,11 +160,13 @@ class TestUdrlDisablesEvasion:
     def test_stomp_forced_off_under_udrl(self):
         assert 'if loader_type == "udrl-vs":\n            module_stomp = False' in self.b
 
-    def test_dll_target_links_desync_stub(self):
+    def test_dll_target_links_ghost_stub(self):
         makefile = read(AGENT, "Makefile")
         dll = makefile[makefile.index("dll-x64:"):]
         dll = dll[:dll.index("\n\n")]
-        assert "nasm64" in dll and "desync_spoof.x64.obj" in dll
+        # LACUNA ghost-chain stub (replaced the retired desync stub) must be
+        # assembled and linked into the DLL target
+        assert "nasm64" in dll and "ghost_spoof.x64.obj" in dll
         # entry.x64.obj must NOT be linked into the DLL (DllMain is the entry;
         # main_entry doesn't exist under DLL_MODE)
         assert "entry.x64.obj" not in dll

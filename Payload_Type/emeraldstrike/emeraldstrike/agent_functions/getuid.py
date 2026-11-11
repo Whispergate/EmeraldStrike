@@ -14,7 +14,7 @@ class GetuidCommand(CommandBase):
     cmd = "getuid"
     needs_admin = False
     help_cmd = "getuid"
-    description = "Get current process ID"
+    description = "Get the current user identity (DOMAIN\\user) from the process token."
     version = 1
     supported_ui_features = []
     author = "@Lavender-exe"

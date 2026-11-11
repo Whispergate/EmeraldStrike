@@ -5,10 +5,13 @@ CCX64  := $(CCACHE) clang -target x86_64-w64-mingw32
 CCX86  := $(CCACHE) clang -target i686-w64-mingw32
 ASMCC  := nasm
 
-CFLAGS := -Os -nostdlib -fno-asynchronous-unwind-tables -std=c++20
+CFLAGS := -Os -nostdlib -fasynchronous-unwind-tables -std=c++20
 CFLAGS += -fno-ident -fpack-struct=8 -falign-functions=1 -s -w -mno-sse
 CFLAGS += -ffunction-sections -fno-zero-initialized-in-bss -falign-jumps=1 -falign-labels=1 -fno-jump-tables
 CFLAGS += -Wl,-s,--strip-all,--enable-stdcall-fixup -masm=intel -fno-exceptions
+# image base 0: RUNTIME_FUNCTION RVAs == blob offsets, so the flat blob can
+# register its unwind table with RtlAddFunctionTable(ImageBase=blob_base)
+CFLAGS += -Wl,--image-base,0
 CFLAGS += -fms-extensions -fno-builtin -Iinclude
 
 # Linker script is applied only at link time so the x86 probe link can swap in
@@ -95,7 +98,7 @@ x86: nasm86 $(OBJ86)
 
 dll-x64: $(DLLOBJS64) nasm64
 	@ echo "compiling x64 DLL for UDRL"
-	@ $(CCX64) bin/obj/*.dll64.obj bin/obj/desync_spoof.x64.obj -o bin/$(NAME).x64.dll -shared $(DLLCFLAGS) $(CFLAGS_X64_INC) \
+	@ $(CCX64) bin/obj/*.dll64.obj bin/obj/ghost_spoof.x64.obj -o bin/$(NAME).x64.dll -shared $(DLLCFLAGS) $(CFLAGS_X64_INC) \
 	  -Wl,-s,--enable-stdcall-fixup,-e,DllMain,--exclude-all-symbols,-Map=bin/$(NAME).x64.map
 	@ strip --strip-unneeded bin/$(NAME).x64.dll
 
@@ -113,7 +116,7 @@ dll-x64: $(DLLOBJS64) nasm64
 
 nasm64:
 	@ $(ASMCC) -f win64 src/asm/entry.x64.asm -o bin/obj/entry.x64.obj
-	@ $(ASMCC) -f win64 src/asm/desync_spoof.x64.asm -o bin/obj/desync_spoof.x64.obj
+	@ $(ASMCC) -f win64 src/asm/ghost_spoof.x64.asm -o bin/obj/ghost_spoof.x64.obj
 
 nasm86:
 	@ $(ASMCC) -f win32 src/asm/entry.x86.asm -o bin/obj/entry.x86.obj

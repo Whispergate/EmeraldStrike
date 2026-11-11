@@ -95,7 +95,7 @@ static inline void _hh_write_teb(void* p) {
 }
 
 // ── HH_SYSCALL macro: when callstack spoofing is enabled AND initialized,
-// route through desync_spoof_call for clean callstack. Otherwise direct dispatch. ──
+// route through ghost_spoof_call / the LACUNA stomp window for a clean callstack. ──
 
 #if defined(INCLUDE_EVASION_CALLSTACK_SPOOF) && (CALLSTACK_SPOOF_MODE != SPOOF_NONE)
 

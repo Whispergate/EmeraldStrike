@@ -2,7 +2,7 @@
 
 EmeraldStrike is a Windows post-exploitation agent for [Mythic](https://github.com/its-a-feature/Mythic). It compiles as position-independent code (PIC) shellcode compatible with Cobalt Strike 4.13 loaders, sleepmasks, and BOF tooling.
 
-The agent is written in C/C++20 and cross-compiled with Clang + mingw-w64. It resolves all Win32 APIs at runtime via DJB2 hash walking the PEB, communicates over a binary TLV wire protocol with AES-256-CBC encryption, and supports HTTP (WinINet or WinHTTP) and SMB named-pipe transports.
+The agent is written in C/C++20 and cross-compiled with Clang + mingw-w64. It resolves all Win32 APIs at runtime via DJB2 hash walking the PEB, communicates over a binary TLV wire protocol with AES-256-CBC encryption, and supports HTTP (WinINet or WinHTTP), SMB named-pipe, and Azure Blob Storage transports.
 
 ## Features
 
@@ -11,8 +11,13 @@ The agent is written in C/C++20 and cross-compiled with Clang + mingw-w64. It re
 - Sleepmask COFF support (XOR heap masking, Ekko timer-queue ROP)
 - Beacon Gate: routes Win32 API calls through the sleepmask COFF for CFG compatibility
 - BOF (Beacon Object File) execution engine with full `beacon.h` API
-- Four injection techniques: CRT, Early Bird APC, NtCreateSection, Custom
-- AMSI and ETW patching at agent init
+- Four injection techniques: CRT, Early Bird APC, NtCreateSection, Custom (plus HellsHall direct-syscall dispatch)
+- HellsHall indirect syscalls (x64/x86): SSN extraction from ntdll, hooked-stub recovery, random `syscall` instruction gadget
+- Callstack spoofing (x64, SilentMoonwalk/desync): WMI, RPC, or custom-module frame chains routed through every syscall
+- Module stomping (x64): agent code copied into a signed DLL's `.text` so all return addresses are file-backed
+- Module shifting (x64): backup/restore of the sacrifice region on exit (erases the Modified-Code IoC), pad offset to keep the section's first page matching disk, and transient shift-and-restore execution for EA/BOF bootstraps with zero residual artifacts
+- Fork-and-run for BOF and execute-assembly (sacrifice process via APC, CFG-safe)
+- AMSI and ETW patching at agent init and in every CLR bootstrap path
 - Smart inject (RW to RX split permissions), PE header stomping, section obfuscation
 - Binary TLV wire protocol with AES-256-CBC encryption
 - Compile-time command selection (only ship what you need)
@@ -63,117 +68,29 @@ docker run -d --name emeraldstrike emeraldstrike
 |---------|---------|-------------|
 | HTTP | WinINet (default) or WinHTTP | Standard HTTP/HTTPS callbacks. Configurable host, port, URIs, user-agent, proxy with auth. |
 | SMB | Named Pipes | Peer-to-peer linking over named pipes. Used for internal pivoting with `link` / `unlink`. |
+| Azure Blob | WinINet or WinHTTP (REST, no Azure SDK) | Polling transport over Azure Blob Storage. Blends into allowed `*.blob.core.windows.net` egress. |
 
-## Build Parameters
+### Azure Blob transport
 
-### Main
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `output_type` | Choice | `bin` | Output format: `bin` (raw PIC), `dll`, `exe` |
-| `architecture` | Choice | `x64` | Target: `x64` or `x86` |
-| `debug` | Boolean | `false` | Include `OutputDebugStringA` markers |
-| `http_library` | Choice | `wininet` | HTTP stack: `wininet` or `winhttp` |
+Uses the `azure_blob` C2 profile with per-agent container isolation. At payload build time the profile creates a dedicated container (`agent-{uuid12}`) and mints a container-scoped SAS token - the storage account key never leaves the server, and a compromised agent can only touch its own container. SAS expiry ties to the payload kill date.
 
-### UDRL
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `loader_type` | Choice | `default` | `default` (raw PIC) or `udrl-vs` (reflective loader kit) |
-| `udrl_vs_file` | File | - | ZIP containing `loader/` and `mask/` with Makefiles |
+The agent speaks plain HTTPS REST against `https://{account}.blob.core.windows.net/{container}/`:
 
-### Evasion
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `sleep_mask` | Choice | `default` | `none`, `default` (XOR heap), `ekko` (timer-queue ROP) |
-| `injection_technique` | Choice | `crt` | `crt`, `apc` (Early Bird), `section` (NtCreateSection), `custom` |
-| `cleanup` | Boolean | `true` | Free initial shellcode allocation after load |
-| `stomppe` | Boolean | `true` | Zero PE headers in memory |
-| `obfuscate` | Boolean | `false` | XOR non-executable sections on load |
-| `userwx` | Boolean | `false` | Allow RWX memory (false = RW then RX) |
-| `smartinject` | Boolean | `true` | RW then RX split permissions for injection |
-| `patch_amsi` | Boolean | `true` | Patch AMSI at init |
-| `patch_etw` | Boolean | `true` | Patch ETW at init |
-| `beacon_gate` | Boolean | `true` | Route API calls through sleepmask (UDRL only) |
+- `PUT  ats/{message-id}.blob` - submit a message (agent-to-server)
+- `GET  sta/{message-id}.blob` - poll for the reply (server-to-agent), then `DELETE` it
 
-## Commands
+Message IDs are fresh v4 GUIDs per request. The wire format (base64 of `uuid36 + payload`) is identical to the HTTP profile, so the encryption and tasking layers are unchanged. The response poll runs through the sleep mask, so Ekko-style obfuscation covers the waiting period. Trade-off: polling-based, so latency per task is roughly one C2 interval and bulk traffic (SOCKS, large downloads) is slow.
 
-### Filesystem
-| Command | Description |
-|---------|-------------|
-| `shell` | Execute a command via `cmd.exe /c` |
-| `run` | Execute a program directly |
-| `execute` | Execute a program with output capture |
-| `ls` | List directory contents |
-| `cd` | Change working directory |
-| `pwd` | Print working directory |
-| `cat` | Read file contents |
-| `cp` | Copy a file |
-| `mv` | Move / rename a file |
-| `rm` | Delete a file |
-| `mkdir` | Create a directory |
-| `upload` | Upload a file to the target |
-| `download` | Download a file from the target |
-
-### Process Management
-| Command | Description |
-|---------|-------------|
-| `ps` | List running processes |
-| `kill` | Terminate a process by PID |
-| `jobs` | List running agent jobs |
-| `jobkill` | Kill an agent job |
-
-### Identity
-| Command | Description |
-|---------|-------------|
-| `whoami` | Print current username |
-| `getuid` | Get user SID and integrity level |
-| `getprivs` | Enable token privileges |
-| `steal_token` | Steal a token from another process |
-| `make_token` | Create a token with credentials |
-| `rev2self` | Drop impersonated token |
-
-### Injection and Execution
-| Command | Description |
-|---------|-------------|
-| `inject` | Inject shellcode into a remote process |
-| `spawn` | Spawn a sacrificial process and inject shellcode |
-| `spawnas` | Spawn a process as another user |
-| `runu` | Run a command with a stolen token |
-| `inline_execute` | Execute a Beacon Object File (BOF) |
-| `register_bof` | Register a BOF for repeated use |
-| `execute_assembly` | Load and run a .NET assembly in memory |
-| `register_assembly` | Register a .NET assembly for repeated use |
-| `powershell_import` | Import a PowerShell script |
-| `powerpick` | Run PowerShell without `powershell.exe` |
-
-### Evasion and Configuration
-| Command | Description |
-|---------|-------------|
-| `sleep` | Set callback interval and jitter |
-| `config` | View or modify runtime agent configuration |
-| `spawnto_x64` | Set the default x64 spawnto program |
-| `spawnto_x86` | Set the default x86 spawnto program |
-| `argue` | Spoof command-line arguments |
-| `ppid` | Set parent PID for spawned processes |
-| `blockdlls` | Block non-Microsoft DLLs in child processes |
-| `exit` | Terminate the agent |
-
-### Networking
-| Command | Description |
-|---------|-------------|
-| `socks` | Start or stop a SOCKS proxy |
-| `rportfwd` | Reverse port forwarding |
-| `link` | Link to a peer agent over SMB |
-| `unlink` | Disconnect a linked agent |
-
-## Evasion
+Requires the `azure_blob` C2 profile to be installed and running on the Mythic server (with its `config.json` holding the storage account credentials). Builds fail fast at provisioning time if the profile is unreachable.
 
 ### Sleep Masking
 
-Three built-in modes, selected at compile time:
+Four built-in modes, selected at compile time:
 
 - **none**: plain `Sleep()`, no memory protection.
 - **default**: XOR-masks heap records and sensitive fields during sleep, unmasks on wake.
-- **ekko**: timer-queue ROP chain using `SystemFunction032` for encrypt/decrypt (x64 only).
+- **ekko**: timer-queue ROP chain using `SystemFunction032` for encrypt/decrypt (x64 only). Encrypts the whole image, not just heap records.
+- **udrl**: sleepmask compiled from the uploaded UDRL kit (see below).
 
 When using UDRL-VS mode, the sleepmask is compiled from the uploaded kit as a COFF object and embedded into the agent. The agent calls into the COFF sleepmask via the `sleep_mask(PBEACON_INFO, PFUNCTION_CALL)` interface.
 
@@ -198,7 +115,39 @@ Smart inject (on by default) uses RW then RX split permissions instead of RWX.
 
 ### AMSI / ETW
 
-Patched at agent init when enabled. Each can be toggled independently via build parameters.
+Patched at agent init when enabled. Each can be toggled independently via build parameters. Both patches are also applied inside every CLR bootstrap path (inline and fork-and-run execute-assembly, powerpick), since a fresh CLR loads its own copies of the relevant state.
+
+### HellsHall indirect syscalls
+
+Enabled with `indirect_syscalls`. At init the agent walks ntdll's export directory, extracts SSNs from the `mov eax, SSN` stub pattern, and recovers SSNs for hooked stubs from their unhooked neighbours. Syscall dispatch jumps to a `syscall; ret` instruction found at a random offset inside ntdll (or `sysenter`/`int 0x2e` on x86), so the return address never points at the agent. Hashes are computed at runtime from obfuscated strings - no static hash table exists in the payload.
+
+### Callstack spoofing
+
+`callstack_spoof` (x64, standalone PIC builds only - hidden and force-disabled under UDRL). Wraps every HellsHall syscall dispatch in a SilentMoonwalk-style ROP chain: four fabricated frames built from real `KernelBase.dll` unwind entries, so the stack walker sees the syscall returning into a legitimate module instead of the agent's memory. Frame sources per mode:
+
+- `wmi` - `wbemcomn.dll` / `fastprox.dll` (WMI provider callback chain)
+- `rpc` - `rpcrt4.dll` (RPC dispatch chain)
+- `custom` - operator-specified module (`callstack_spoof_module`)
+
+Gadget discovery scans the module's `.pdata` at init; if the spoofer fails to initialize, every syscall silently falls back to direct dispatch.
+
+### Module stomping
+
+`module_stomp` (x64, standalone PIC builds only - hidden and force-disabled under UDRL). At init the agent loads a sacrificial signed DLL (`HostNetSvc.dll`, `WsmSvc.dll`, `localspl.dll`, or `gpsvc.dll` - picked at random from whichever exists) via a VEH-intercepted `LoadLibraryW` that neuters its `DllMain` and skips TLS init, then copies its own code into the DLL's `.text` section and transfers execution there. The original allocation is zeroed and freed. Result: every return address in every call stack - including transport calls that never touch a syscall - resolves into a file-backed, Microsoft-signed module. Verified with a `VirtualQueryEx` sweep: zero `MEM_PRIVATE` executable regions after stomp.
+
+### Module shifting
+
+`module_shift` (x64, standalone PIC builds only - hidden and force-disabled under UDRL, implies `module_stomp`). Implements naksyn's ModuleShifting refinement of module stomping: the sacrifice region is backed up before the overwrite and restored when the agent exits, erasing the Modified-Code IoC that memory-vs-disk differencing tools (Moneta, PE-Sieve) key on. The agent blob also lands at `section_base + 0x200` (the `module_shift_pad` toggle, on by default) so the section's first page still matches the on-disk image - mimicking the benign partial-overwrite look of a legitimate page-in. The relationship to the other modes:
+
+- `module_stomp` - persistent file-backed execution, agent bytes remain in the sacrifice `.text` for the agent's lifetime
+- `module_shift` - the same stomp, plus backup/restore of the original `.text`/`.pdata` bytes on exit and the pad offset
+- `shift_bootstrap` - transient write-execute-restore: `execute_assembly`/`inline_execute` fork-and-run bootstraps run inside a shifted DLL section **in-process** (no sacrifice process at all), and the original section bytes are restored the moment the bootstrap returns - zero residual artifacts per run
+
+Because the agent is executing inside the region it wants to restore, the persistent-stomp exit restore cannot memcpy back in place. A small position-independent restore stub (`rep movsb` + `VirtualProtect` + exit handoff) is staged in a freshly allocated page and does the copy from memory that is not part of the restored region, then transfers directly to `ExitThread`/`ExitProcess` per the `exit` method. The transient `shift_bootstrap` path restores inline - it executes from the agent's own allocation, not the shifted region.
+
+### Fork-and-run
+
+`execute_assembly`, `inline_execute`, and `powerpick` can run in a sacrificial process instead of inline. The sacrifice is spawned suspended and the bootstrap is queued via APC.
 
 ## UDRL-VS Integration
 
@@ -235,7 +184,7 @@ EmeraldStrike matches Cobalt Strike 4.13 structures and interfaces:
 - `DllMain` protocol: handles `DLL_BEACON_USER_DATA` (0x0d) and `DLL_BEACON_START` (0x04)
 - Version: `0x041300`
 
-Existing CS 4.13 UDRL kits, sleepmask kits, and BOFs work without modification.
+Existing CS 4.13 UDRL kits, sleepmask kits, and BOFs work with little to no modification.
 
 ## Customization
 
@@ -252,3 +201,35 @@ Existing CS 4.13 UDRL kits, sleepmask kits, and BOFs work without modification.
 1. Add a new `#elif INJECTION_TECHNIQUE == INJECT_YOURMETHOD` block in `injection.cc`
 2. Add the constant to `config.h`
 3. Add the choice to `injection_technique` in `builder.py`
+
+### Adding a transport
+
+1. Create `agent_code/src/transport/mytransport.cc` implementing the same surface as `http.cc` (the `send_mythic_msg` path in `main.cc` needs a send function; the wire format should stay `base64(uuid36 + payload)`)
+2. Add a `#ifdef MY_TRANSPORT` parse branch to `parse_config` in `main.cc` and a config struct to `INSTANCE` in `include/common.h`
+3. Wire the transport into `agent_init` (API/library resolution) and the `agent_main` loop gates
+4. In `builder.py`: add the profile name to `c2_profiles`, stamp the define, serialize the new config fields in `_serialize_config` (mirroring the parse order exactly), and provision any server-side resources before stamping
+
+## Testing
+
+`tests/` contains pytest suites covering the builder, linker/layout invariants, and each evasion feature:
+
+```bash
+python -m pytest tests/ -q
+```
+
+Compile-verification for manual changes (expands `config.h` inside the container - restore it from the host afterward; the container has no `.git`):
+
+```bash
+docker run --rm -v "<agent_code>:/agent_code" emeraldstrike:latest bash -c "cd /agent_code && mkdir -p bin/obj && make x64"
+```
+
+Key invariants the tests enforce: the six `config.h` placeholders exist (a clobbered template still compiles but produces an agent that never calls back), `__InstanceStorage` sorts last in the linker script, and callstack spoofing / module stomping are force-disabled under UDRL.
+
+## Known Limitations
+
+- Module stomping and callstack spoofing are x64-only and unavailable under UDRL-VS builds (the loader kit controls memory layout there).
+- Module shifting restores the sacrifice region only at agent exit; while the agent is alive, the stomped `.text` still differs from disk (though the padded first page matches). The transient `shift_bootstrap` path restores after every run.
+- The module-stomp transplant does not yet rebase the agent's `.pdata` unwind entries - the stomped region keeps the sacrifice DLL's original unwind info, so stack walks through stomped frames are clean but shallow (all shown frames are file-backed).
+- Ekko sleep masking is x64-only; x86 builds fall back to the default XOR mask.
+- Azure Blob transport is polling-based: per-task latency is roughly one C2 interval, and high-volume channels (SOCKS, large transfers) are slow.
+- Fork-and-run `powerpick` uses a unique-per-task PSRunner assembly; the first run in a fresh sacrifice pays PowerShell runspace startup cost.

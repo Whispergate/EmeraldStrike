@@ -235,7 +235,9 @@ class TestEkkoSleep:
 class TestInjectionHellsHall:
     @pytest.fixture(autouse=True)
     def load(self):
-        self.src = read("src/evasion/injection.cc")
+        # techniques live in per-technique files since the injection split
+        self.src = read("src/evasion/injection_hellshall.cc")
+        self.dispatch = read("src/evasion/injection.cc")
 
     def test_hellshall_include(self):
         assert '#include "evasion/hellshall.h"' in self.src
@@ -254,7 +256,18 @@ class TestInjectionHellsHall:
 
     def test_auto_prefer_hellshall(self):
         assert "inst->bHellsHallInit" in self.src
-        assert "inject_hellshall(inst" in self.src
+        # the dispatcher prefers hellshall at runtime
+        assert "inject_hellshall(inst" in self.dispatch
+
+    def test_techniques_split(self):
+        # one translation unit per technique, each gated to its own
+        # INJECTION_TECHNIQUE value
+        for tech in ("crt", "apc", "section", "custom", "cascade"):
+            s = read(f"src/evasion/injection_{tech}.cc")
+            assert f"INJECTION_TECHNIQUE == INJECT_{tech.upper()}" in s
+            assert f"injection_{tech}.cc" in read("src/evasion/injection.cc")
+        assert "INJECT_CUSTOM" in read("include/evasion/injection.h")
+        assert "INJECT_APC" in read("include/evasion/injection.h")
 
     def test_smartinject_guard(self):
         assert "INCLUDE_EVASION_SMARTINJECT" in self.src
@@ -392,12 +405,79 @@ class TestHashResolutionOption:
         assert "#define HH_HASH_DYNAMIC" in self.builder
 
 
-# ─── CFG-safe injection (Early Bird) ───
+# ─── Early Cascade injection (Outflank 2024 / Cracked5pider PoC) ───
+
+class TestEarlyCascade:
+    @pytest.fixture(autouse=True)
+    def load(self):
+        self.src = read("src/evasion/injection_cascade.cc")
+        self.cfg = read("include/config.h")
+        self.builder = read_py("builder.py")
+        self.spawn = read("src/commands/cmd_spawn.cc")
+
+    def test_constant_no_conflict(self):
+        # INJECT_HELLSHALL keeps its tested value; cascade gets its own
+        assert re.search(r"#define\s+INJECT_CASCADE\s+5", self.cfg)
+        assert re.search(r"#define\s+INJECT_HELLSHALL\s+4", self.cfg)
+
+    def test_builder_choice(self):
+        assert '"cascade"' in self.builder
+        assert '"cascade": "INJECT_CASCADE"' in self.builder
+
+    def test_stub_present_and_patched(self):
+        # the PI shim-callback stub with its four runtime patch sites
+        assert "cascade_stub_x64" in self.src
+        assert "CASCADE_OFF_PAYLOAD   16" in self.src
+        assert "CASCADE_OFF_SHIMS      25" in self.src
+        assert "CASCADE_OFF_CONTEXT    35" in self.src
+        assert "CASCADE_OFF_QUEUEAPC   49" in self.src
+        # stub disables the shim engine before queueing the APC
+        assert "0xA2" in self.src          # mov ds:[imm64], al
+
+    def test_symbol_resolution(self):
+        # dynamic g_pfnSE_DllLoaded / g_ShimsEnabled resolution: anchor walk
+        # (Win11 + Win10 anchors) plus the .text pattern-scan fallback
+        assert "H_RtlUnlockMemoryBlockLookaside" in self.src
+        assert "H_RtlQueryDepthSList" in self.src
+        assert "cas_find_se_dll_loaded" in self.src
+        assert "cas_find_shims_enabled" in self.src
+        # .mrdata / .data section-bounds validation
+        assert '".mrdata"' in self.src
+        assert '".data"' in self.src
+
+    def test_cookie_encoding(self):
+        # g_pfnSE_DllLoaded must carry the SharedUserData cookie encoding
+        assert "0x7FFE0330" in self.src
+        assert "cas_encode_system_ptr" in self.src
+
+    def test_initial_thread_required(self):
+        # cascade only works on a freshly spawned suspended process
+        assert "hInitialThread" in self.src
+        assert "use spawn" in self.src
+
+    def test_spawn_passes_initial_thread(self):
+        assert "inject_shellcode_into(inst, pi.hProcess, pi.hThread" in self.spawn
+        # cascade returns pi.hThread: the caller must not double-close it
+        assert "hThread != pi.hThread" in self.spawn
+
+    def test_rx_not_rwx(self):
+        # stub region: RW -> RX (executes via the shim callback, never self-writes)
+        # payload region: the agent blob SELF-WRITES (.instdata/INSTANCE) - a
+        # single combined RX region killed it at entry (dump-verified
+        # 2026-11-10: AV at payload+0x23 writing relocated pointers)
+        assert "remote_stub" in self.src
+        assert "remote_payload" in self.src
+        assert "PAGE_READWRITE" in self.src
+        assert "PAGE_EXECUTE_READ" in self.src
+        assert "PAGE_EXECUTE_READWRITE" in self.src
+
+
+
 
 class TestCfgSafeInjection:
     @pytest.fixture(autouse=True)
     def load(self):
-        self.inj = read("src/evasion/injection.cc")
+        self.inj = read("src/evasion/injection_hellshall.cc")
         self.fork = read("src/evasion/fork_and_run.cc")
         self.hdr = read("include/evasion/hellshall.h")
 

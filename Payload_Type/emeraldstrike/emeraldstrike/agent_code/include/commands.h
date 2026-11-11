@@ -78,4 +78,96 @@ VOID cmd_powerpick(PINSTANCE inst, PPARSER args, PPACKAGE response);
 VOID cmd_link(PINSTANCE inst, PPARSER args, PPACKAGE response);
 VOID cmd_unlink(PINSTANCE inst, PPARSER args, PPACKAGE response);
 
+#ifdef INCLUDE_CMD_ENV
+VOID cmd_env(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_DRIVERS
+VOID cmd_drivers(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_TASKS
+VOID cmd_tasks(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_SERVICES
+VOID cmd_services(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_SOFTWARE
+VOID cmd_software(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_NETSTAT
+VOID cmd_netstat(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_ARP
+VOID cmd_arp(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_ROUTE
+VOID cmd_route(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_LOCALGROUP
+VOID cmd_localgroup(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_SHARE
+VOID cmd_share(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_DOMAININFO
+VOID cmd_domaininfo(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_UAC
+VOID cmd_uac(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_DEFENDER
+VOID cmd_defender(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_WINDOWLIST
+VOID cmd_windowlist(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_UPTIME
+VOID cmd_uptime(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_QUSER
+VOID cmd_quser(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_FIND
+VOID cmd_find(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_GREP
+VOID cmd_grep(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_TREE
+VOID cmd_tree(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_STAT
+VOID cmd_stat(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_TIMESTOMP
+VOID cmd_timestomp(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_WGET
+VOID cmd_wget(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_PSGREP
+VOID cmd_psgrep(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_PROCINFO
+VOID cmd_procinfo(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_CLIPBOARD
+VOID cmd_clipboard(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_PING
+VOID cmd_ping(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_DNS
+VOID cmd_dns(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_PORTSCAN
+VOID cmd_portscan(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#ifdef INCLUDE_CMD_CURL
+VOID cmd_curl(PINSTANCE inst, PPARSER args, PPACKAGE response);
+
+#ifdef INCLUDE_CMD_SPOOF_TEST
+VOID cmd_spooftest(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#endif
+
 #endif // EMERALDSTRIKE_COMMANDS_H

