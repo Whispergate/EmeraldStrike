@@ -1,5 +1,6 @@
 #include "config.h"
 #include "common.h"
+#include "salt.h"
 #include "parser.h"
 #include "package.h"
 #include "commands.h"
@@ -736,6 +737,7 @@ static VOID obfuscate_pe_sections(PINSTANCE inst, PVOID dll_base) {
 #endif
 
 VOID agent_init(PINSTANCE inst, HINSTANCE hDll) {
+    SALT_RETAIN(inst);   // build-randomisation sink: keeps the per-build salt alive
     resolve_apis(inst);
     DBG(inst, "[ES] APIs resolved");
     parse_config(inst, CONFIG_BYTES, sizeof(CONFIG_BYTES));

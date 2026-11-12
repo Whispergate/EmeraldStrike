@@ -3,8 +3,14 @@
 
 namespace obf {
 
-constexpr unsigned char XK = 0x41;
-constexpr unsigned char XM = 131;
+#ifndef OBF_XK
+#define OBF_XK 0x41
+#endif
+#ifndef OBF_XM
+#define OBF_XM 131
+#endif
+constexpr unsigned char XK = OBF_XK;
+constexpr unsigned char XM = OBF_XM;
 
 template<unsigned N>
 struct enc {

