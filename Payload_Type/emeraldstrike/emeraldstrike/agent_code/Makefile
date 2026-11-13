@@ -100,7 +100,7 @@ dll-x64: $(DLLOBJS64) nasm64
 	@ echo "compiling x64 DLL for UDRL"
 	@ $(CCX64) bin/obj/*.dll64.obj bin/obj/ghost_spoof.x64.obj -o bin/$(NAME).x64.dll -shared $(DLLCFLAGS) $(CFLAGS_X64_INC) \
 	  -Wl,-s,--enable-stdcall-fixup,-e,DllMain,--exclude-all-symbols,-Map=bin/$(NAME).x64.map
-	@ strip --strip-unneeded bin/$(NAME).x64.dll
+	@ strip --strip-all --remove-section=.comment --remove-section=.note.GNU-stack bin/$(NAME).x64.dll
 
 %.x64.obj: %.cc
 	@ echo "-> compiling $< to $(notdir $@)"

@@ -610,13 +610,19 @@ static void* resolve_coff_symbol(PINSTANCE inst, const char* name) {
         if (hMod) {
             FARPROC addr = inst->Win32.GetProcAddress(hMod, func_name);
             if (addr) return (void*)addr;
+#ifdef DEBUG
             if (inst->Win32.OutputDebugStringA) {
                 inst->Win32.OutputDebugStringA("[BOF] DFR GetProcAddress FAILED:");
                 inst->Win32.OutputDebugStringA(func_name);
             }
-        } else if (inst->Win32.OutputDebugStringA) {
-            inst->Win32.OutputDebugStringA("[BOF] DFR LoadLibraryA FAILED:");
-            inst->Win32.OutputDebugStringA(mod_name);
+#endif
+        } else {
+#ifdef DEBUG
+            if (inst->Win32.OutputDebugStringA) {
+                inst->Win32.OutputDebugStringA("[BOF] DFR LoadLibraryA FAILED:");
+                inst->Win32.OutputDebugStringA(mod_name);
+            }
+#endif
         }
     }
 
