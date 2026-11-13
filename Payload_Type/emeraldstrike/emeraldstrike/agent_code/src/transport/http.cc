@@ -77,6 +77,15 @@ static BOOL _http_request(PINSTANCE inst, LPCSTR verb, LPCSTR path,
         return FALSE;
     }
 
+    // Receive timeout on the request handle: a stale pooled connection can
+    // otherwise block InternetReadFile indefinitely (same failure shape as
+    // the WinHttp path - infinite event wait instead of an error).
+    {
+        DWORD recv_timeout = 60000;   // 60s
+        inst->Win32.InternetSetOptionA(hRequest, 14 /*INTERNET_OPTION_RECEIVE_TIMEOUT*/,
+                                       &recv_timeout, sizeof(recv_timeout));
+    }
+
     if (inst->Http.use_ssl) {
         DWORD sec_flags = SECURITY_FLAG_IGNORE_ALL;
         inst->Win32.InternetSetOptionA(hRequest, INTERNET_OPTION_SECURITY_FLAGS,
@@ -207,6 +216,21 @@ static BOOL _http_request(PINSTANCE inst, LPCWSTR verb, LPCWSTR path,
     if (!hRequest) {
         wh_drop_handles(inst);
         return FALSE;
+    }
+
+    // Per-request timeouts (ms): resolve, connect, send, receive. Without
+    // these a stale pooled connection leaves WinHttpReceiveResponse waiting
+    // INDEFINITELY on an internal event that never signals (dump-verified:
+    // es_p8 live dump, main thread ZwWaitForSingleObject timeout=0 on event
+    // handle 0x34) - the beacon hangs forever instead of erroring and
+    // retrying on a fresh connection. WINHTTP_OPTION_RECEIVE_TIMEOUT etc.
+    // are per-option; the four values here mirror WinHttpSetTimeouts.
+    if (inst->Win32.WinHttpSetOption) {
+        DWORD timeouts[4] = { 15000, 15000, 30000, 60000 };
+        inst->Win32.WinHttpSetOption(hRequest, 6 /*WINHTTP_OPTION_RESOLVE_TIMEOUT*/, &timeouts[0], sizeof(DWORD));
+        inst->Win32.WinHttpSetOption(hRequest, 7 /*WINHTTP_OPTION_CONNECT_TIMEOUT*/, &timeouts[1], sizeof(DWORD));
+        inst->Win32.WinHttpSetOption(hRequest, 8 /*WINHTTP_OPTION_SEND_TIMEOUT*/, &timeouts[2], sizeof(DWORD));
+        inst->Win32.WinHttpSetOption(hRequest, 9 /*WINHTTP_OPTION_RECEIVE_TIMEOUT*/, &timeouts[3], sizeof(DWORD));
     }
 
     if (inst->Http.use_ssl) {

