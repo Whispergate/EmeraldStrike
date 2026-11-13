@@ -30,7 +30,7 @@ HANDLE inject_custom(PINSTANCE inst, HANDLE hProcess, BYTE* shellcode, DWORD sc_
 HANDLE inject_cascade(PINSTANCE inst, HANDLE hProcess, HANDLE hInitialThread, BYTE* shellcode, DWORD sc_len, DWORD* step);
 #endif
 #ifdef INCLUDE_EVASION_HELLSHALL
-HANDLE inject_hellshall(PINSTANCE inst, HANDLE hProcess, BYTE* shellcode, DWORD sc_len, DWORD* step);
+HANDLE inject_hellshall(PINSTANCE inst, HANDLE hProcess, BYTE* shellcode, DWORD sc_len, DWORD* step, BOOL bForceRWX);
 #endif
 
 #endif // EMERALDSTRIKE_INJECTION_H
