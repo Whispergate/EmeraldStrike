@@ -1,6 +1,6 @@
 {
   "rabbitmq_host": "10.5.99.6",
-  "rabbitmq_password": "1l3LwALv8Q6ZVRQdqOvSwbSmsQIzdy",
+  "rabbitmq_password": "v9cKPLFrURGpMe4fPwW3OKtV8kC9bh",
   "mythic_server_host": "10.5.99.6",
   "mythic_server_grpc_port": 17444,
   "mythic_server_port": 17443,

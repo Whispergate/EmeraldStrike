@@ -26,8 +26,8 @@ class ScreenshotCommand(CommandBase):
     browser_script = BrowserScript(script_name="screenshot", author="@djhohnstein", for_new_ui=True)
     attributes = CommandAttributes(builtin=False, supported_os=[SupportedOS.Windows])
 
-    async def create_go_tasking(self, taskData: MythicCommandBase.PTTaskMessageAllData) -> MythicCommandBase.PTTaskCreateTaskingMessageResponse:
-        return MythicCommandBase.PTTaskCreateTaskingMessageResponse(
+    async def create_go_tasking(self, taskData: PTTaskMessageAllData) -> PTTaskCreateTaskingMessageResponse:
+        return PTTaskCreateTaskingMessageResponse(
             TaskID=taskData.Task.ID, Success=True,
         )
 

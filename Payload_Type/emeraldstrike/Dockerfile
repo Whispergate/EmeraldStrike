@@ -1,4 +1,6 @@
 FROM itsafeaturemythic/mythic_python_dotnet:latest
+RUN pip3 install mythic_container==0.7.0rc9
+RUN pip3 install --upgrade --force-reinstall grpcio>=1.78.0
 
 RUN apt-get clean
 RUN dpkg --add-architecture i386
@@ -17,6 +19,7 @@ ENV CCACHE_DIR=/var/cache/ccache
 ENV CCACHE_MAXSIZE=500M
 
 COPY [".", "/Mythic"]
+RUN find . -name "*.py" -exec sed -i "s/$//" {} +
 
 WORKDIR /Mythic/
 

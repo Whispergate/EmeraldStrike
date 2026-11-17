@@ -48,6 +48,7 @@ class EmeraldStrike(PayloadType):
     c2_profiles = ["http", "smb", "azure_blob"]
     mythic_encrypts = True
     translation_container = "EmeraldStrikeTranslator"
+    semver = "2.3.0"
 
     agent_path = pathlib.Path(__file__).resolve().parent.parent
     agent_icon_path = agent_path / "assets" / "emeraldstrike_logo.png"
