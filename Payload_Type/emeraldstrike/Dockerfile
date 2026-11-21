@@ -1,5 +1,13 @@
 FROM itsafeaturemythic/mythic_python_dotnet:latest
 
+# Fix old Debian sources so apt works again
+RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true && \
+    printf '%s\n' \
+      'deb [check-valid-until=no] https://archive.debian.org/debian bullseye main contrib non-free' \
+      'deb [check-valid-until=no] https://archive.debian.org/debian bullseye-updates main contrib non-free' \
+      'deb [check-valid-until=no] https://archive.debian.org/debian-security bullseye-security main contrib non-free' \
+      > /etc/apt/sources.list
+
 RUN apt-get clean
 RUN dpkg --add-architecture i386
 
