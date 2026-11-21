@@ -2,6 +2,14 @@ FROM itsafeaturemythic/mythic_python_dotnet:latest
 RUN pip3 install mythic_container==0.7.0rc9
 RUN pip3 install --upgrade --force-reinstall grpcio>=1.78.0
 
+# Fix old Debian sources so apt works again
+RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true && \
+    printf '%s\n' \
+      'deb [check-valid-until=no] https://archive.debian.org/debian bullseye main contrib non-free' \
+      'deb [check-valid-until=no] https://archive.debian.org/debian bullseye-updates main contrib non-free' \
+      'deb [check-valid-until=no] https://archive.debian.org/debian-security bullseye-security main contrib non-free' \
+      > /etc/apt/sources.list
+
 RUN apt-get clean
 RUN dpkg --add-architecture i386
 
@@ -19,7 +27,7 @@ ENV CCACHE_DIR=/var/cache/ccache
 ENV CCACHE_MAXSIZE=500M
 
 COPY [".", "/Mythic"]
-RUN find . -name "*.py" -exec sed -i "s/$//" {} +
+RUN find . -name "*.py" -exec sed -i "s/$//" {} +
 
 WORKDIR /Mythic/
 
