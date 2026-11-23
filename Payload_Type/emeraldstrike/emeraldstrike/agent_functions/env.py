@@ -1,4 +1,6 @@
 from mythic_container.MythicCommandBase import *
+from mythic_container.MythicRPC import *
+from .bof_utils import bof_tasking
 
 
 class EnvArguments(TaskArguments):
@@ -15,15 +17,18 @@ class EnvCommand(CommandBase):
     needs_admin = False
     help_cmd = "env"
     description = "List all environment variables for the current process."
-    version = 1
+    version = 2
     author = "@Lavender-exe"
     attackmapping = ["T1082"]
     argument_class = EnvArguments
-    attributes = CommandAttributes(builtin=False, supported_os=[SupportedOS.Windows])
-    browser_script = BrowserScript(script_name="env", author="@Lavender-exe", for_new_ui=True)
+    attributes = CommandAttributes(
+        builtin=False,
+        supported_os=[SupportedOS.Windows],
+        dependencies=["inline_execute"],
+    )
 
     async def create_go_tasking(self, taskData: PTTaskMessageAllData) -> PTTaskCreateTaskingMessageResponse:
-        return PTTaskCreateTaskingMessageResponse(TaskID=taskData.Task.ID, Success=True)
+        return await bof_tasking(taskData, "es_env.x64.o")
 
     async def process_response(self, task: PTTaskMessageAllData, response: any) -> PTTaskProcessResponseMessageResponse:
         return PTTaskProcessResponseMessageResponse(TaskID=task.Task.ID, Success=True)

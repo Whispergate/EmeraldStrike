@@ -168,6 +168,18 @@ VOID cmd_curl(PINSTANCE inst, PPARSER args, PPACKAGE response);
 #ifdef INCLUDE_CMD_SPOOF_TEST
 VOID cmd_spooftest(PINSTANCE inst, PPARSER args, PPACKAGE response);
 #endif
+
+#ifdef INCLUDE_CMD_TOKEN_STORE
+VOID cmd_token_store(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+#endif
+
+#ifdef INCLUDE_SOCKS_PROXY
+VOID cmd_socks(PINSTANCE inst, PPARSER args, PPACKAGE response);
+#endif
+
+#ifdef INCLUDE_RPFWD
+VOID cmd_rportfwd(PINSTANCE inst, PPARSER args, PPACKAGE response);
 #endif
 
 #endif // EMERALDSTRIKE_COMMANDS_H

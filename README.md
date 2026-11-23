@@ -225,6 +225,14 @@ docker run --rm -v "<agent_code>:/agent_code" emeraldstrike:latest bash -c "cd /
 
 Key invariants the tests enforce: the six `config.h` placeholders exist (a clobbered template still compiles but produces an agent that never calls back), `__InstanceStorage` sorts last in the linker script, and callstack spoofing / module stomping are force-disabled under UDRL.
 
+## References
+
+- [NomadX](https://github.com/django-88/NomadX) (Zig-based Mythic agent by @django-88) served as the reference architecture for the guardrails module, BOF-redirect pattern, checkin/HTTP retry logic, and kill-date enforcement.
+
+## Contributors
+
+- [r3dc4t0x00](https://github.com/r3dc4t0x00/) - Bug Fixes
+
 ## Known Limitations
 
 - Module stomping and callstack spoofing are x64-only and unavailable under UDRL-VS builds (the loader kit controls memory layout there).

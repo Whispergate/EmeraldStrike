@@ -1,4 +1,6 @@
 from mythic_container.MythicCommandBase import *
+from mythic_container.MythicRPC import *
+from .bof_utils import bof_tasking
 
 
 class DomaininfoArguments(TaskArguments):
@@ -15,15 +17,19 @@ class DomaininfoCommand(CommandBase):
     needs_admin = False
     help_cmd = "domaininfo"
     description = "Query the machine's hostname, DNS domain, FQDN, OS version, and workgroup via GetComputerNameExA and NetWkstaGetInfo."
-    version = 1
+    version = 2
     author = "@Lavender-exe"
     attackmapping = ["T1082"]
     argument_class = DomaininfoArguments
-    attributes = CommandAttributes(builtin=False, supported_os=[SupportedOS.Windows])
-    browser_script = BrowserScript(script_name="domaininfo", author="@Lavender-exe", for_new_ui=True)
+    attributes = CommandAttributes(
+        builtin=False,
+        supported_os=[SupportedOS.Windows],
+        dependencies=["inline_execute"],
+    )
 
     async def create_go_tasking(self, taskData: PTTaskMessageAllData) -> PTTaskCreateTaskingMessageResponse:
-        return PTTaskCreateTaskingMessageResponse(TaskID=taskData.Task.ID, Success=True)
+        args = [("string", "(objectCategory=domainDNS)"), ("string", "")]
+        return await bof_tasking(taskData, "es_ldapsearch.x64.o", coff_arguments=args)
 
     async def process_response(self, task: PTTaskMessageAllData, response: any) -> PTTaskProcessResponseMessageResponse:
         return PTTaskProcessResponseMessageResponse(TaskID=task.Task.ID, Success=True)

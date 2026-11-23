@@ -1,6 +1,6 @@
 FROM itsafeaturemythic/mythic_python_dotnet:latest
 
-# Fix old Debian sources so apt works again
+# Fix old Debian sources so apt works again (Thanks https://github.com/r3dc4t0x00/)
 RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true && \
     printf '%s\n' \
       'deb [check-valid-until=no] https://archive.debian.org/debian bullseye main contrib non-free' \

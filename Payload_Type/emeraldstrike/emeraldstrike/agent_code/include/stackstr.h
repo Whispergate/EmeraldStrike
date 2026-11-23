@@ -7,5 +7,8 @@
 #define STK_WININET(v)      xstr(v, "wininet.dll")
 #define STK_IPHLPAPI(v)     xstr(v, "iphlpapi.dll")
 #define STK_AMSI(v)         xstr(v, "amsi.dll")
+#define STK_NETAPI32(v)     xstr(v, "netapi32.dll")
+#define STK_USER32(v)       xstr(v, "user32.dll")
+#define STK_WS2_32(v)       xstr(v, "ws2_32.dll")
 
 #endif
