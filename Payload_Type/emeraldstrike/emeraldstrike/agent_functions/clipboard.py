@@ -1,4 +1,6 @@
 from mythic_container.MythicCommandBase import *
+from mythic_container.MythicRPC import *
+from .bof_utils import bof_tasking
 
 
 class ClipboardArguments(TaskArguments):
@@ -15,7 +17,7 @@ class ClipboardCommand(CommandBase):
     needs_admin = False
     help_cmd = "clipboard"
     description = "Read the current desktop clipboard contents."
-    version = 1
+    version = 2
     supported_ui_features = []
     author = "@Lavender-exe"
     attackmapping = []
@@ -23,13 +25,11 @@ class ClipboardCommand(CommandBase):
     attributes = CommandAttributes(
         builtin=False,
         supported_os=[SupportedOS.Windows],
+        dependencies=["inline_execute"],
     )
-    browser_script = BrowserScript(script_name="clipboard", author="@Lavender-exe", for_new_ui=True)
 
     async def create_go_tasking(self, taskData: PTTaskMessageAllData) -> PTTaskCreateTaskingMessageResponse:
-        return PTTaskCreateTaskingMessageResponse(
-            TaskID=taskData.Task.ID, Success=True,
-        )
+        return await bof_tasking(taskData, "es_clipdump.x64.o")
 
     async def process_response(self, task: PTTaskMessageAllData, response: any) -> PTTaskProcessResponseMessageResponse:
         return PTTaskProcessResponseMessageResponse(TaskID=task.Task.ID, Success=True)

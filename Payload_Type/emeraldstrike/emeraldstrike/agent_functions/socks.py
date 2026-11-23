@@ -36,9 +36,12 @@ class SocksCommand(CommandBase):
     cmd = "socks"
     needs_admin = False
     help_cmd = "socks start [port]  |  socks stop"
-    description = "Start or stop a SOCKS4a proxy. Traffic is tunneled through the beacon."
-    version = 1
-    supported_ui_features = []
+    description = (
+        "Start or stop a SOCKS5 proxy. Mythic opens a local listener; "
+        "the agent relays TCP connections to the target network."
+    )
+    version = 2
+    supported_ui_features = ["callback_table:socks"]
     author = "@Lavender-exe"
     attackmapping = ["T1090"]
     argument_class = SocksArguments

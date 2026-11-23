@@ -1,4 +1,6 @@
 from mythic_container.MythicCommandBase import *
+from mythic_container.MythicRPC import *
+from .bof_utils import bof_tasking
 
 
 class UptimeArguments(TaskArguments):
@@ -15,15 +17,18 @@ class UptimeCommand(CommandBase):
     needs_admin = False
     help_cmd = "uptime"
     description = "Get system uptime via GetTickCount64. Returns days, hours, minutes, and seconds since last boot."
-    version = 1
+    version = 2
     author = "@Lavender-exe"
     attackmapping = ["T1082"]
     argument_class = UptimeArguments
-    attributes = CommandAttributes(builtin=False, supported_os=[SupportedOS.Windows])
-    browser_script = BrowserScript(script_name="uptime", author="@Lavender-exe", for_new_ui=True)
+    attributes = CommandAttributes(
+        builtin=False,
+        supported_os=[SupportedOS.Windows],
+        dependencies=["inline_execute"],
+    )
 
     async def create_go_tasking(self, taskData: PTTaskMessageAllData) -> PTTaskCreateTaskingMessageResponse:
-        return PTTaskCreateTaskingMessageResponse(TaskID=taskData.Task.ID, Success=True)
+        return await bof_tasking(taskData, "es_uptime.x64.o")
 
     async def process_response(self, task: PTTaskMessageAllData, response: any) -> PTTaskProcessResponseMessageResponse:
         return PTTaskProcessResponseMessageResponse(TaskID=task.Task.ID, Success=True)

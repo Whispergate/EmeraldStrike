@@ -263,13 +263,29 @@ static DWORD blob_request(PINSTANCE inst, const char* verb, const char* path,
 #endif
 }
 
+// Retry wrapper: 3 attempts with escalating backoff (0ms, 500ms, 1500ms).
+// Returns the HTTP status from the last attempt.
+static DWORD blob_request_retry(PINSTANCE inst, const char* verb, const char* path,
+                                const char* extra_hdr, BYTE* body, DWORD body_len,
+                                BYTE** resp, DWORD* resp_len) {
+    static const DWORD backoff_ms[] = { 0, 500, 1500 };
+    DWORD status = 0;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (backoff_ms[attempt] > 0)
+            inst->Win32.Sleep(backoff_ms[attempt]);
+        status = blob_request(inst, verb, path, extra_hdr, body, body_len, resp, resp_len);
+        if (status >= 200 && status < 500) return status; // success or client error (no point retrying 4xx)
+    }
+    return status;
+}
+
 static BOOL blob_put(PINSTANCE inst, const char* path, BYTE* data, DWORD len) {
-    DWORD st = blob_request(inst, "PUT", path, NULL, data, len, NULL, NULL);
+    DWORD st = blob_request_retry(inst, "PUT", path, NULL, data, len, NULL, NULL);
     return st == 201 || st == 200;
 }
 
 static BOOL blob_delete(PINSTANCE inst, const char* path) {
-    DWORD st = blob_request(inst, "DELETE", path, NULL, NULL, 0, NULL, NULL);
+    DWORD st = blob_request_retry(inst, "DELETE", path, NULL, NULL, 0, NULL, NULL);
     return st == 202 || st == 200 || st == 404;   // 404 = already gone, fine
 }
 
